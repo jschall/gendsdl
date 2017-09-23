@@ -1,0 +1,230 @@
+@###############################################
+@#
+@# Canard message source code
+@# generation for C++
+@#
+@# EmPy template for generating <msg>.h files
+@# Based on the original template for ROS
+@#
+@###############################################
+@# Start of Template
+@#
+@# Context:
+@#  - file_name_in (String) Source file
+@#  - spec (msggen.MsgSpec) Parsed specification of the .msg file
+@#  - md5sum (String) MD5Sum of the .msg specification
+@###############################################
+
+/* Auto-generated from file @file_name_in */
+
+@{
+import genmsg.msgs
+from math import ceil
+
+canard_struct = '%s'%spec.short_name
+topic_name = spec.short_name
+offset = 0
+}@
+
+#pragma once
+
+@##############################
+@# Generic Includes
+@##############################
+#include <stdint.h>
+
+@# Constants c style
+
+@[for constant in spec.constants]@
+#define @(constant.name) @(int(constant.val))
+@[end for]
+@{
+print "#define uint64 UAVCAN_%s_MAX_PACK_SIZE %d" % (spec.short_name.upper(),int(ceil(float(spec.max_bit_len)/8.0)))
+print "#define uint64 UAVCAN_%s_MIN_PACK_SIZE %d" % (spec.short_name.upper(), int(ceil(float(spec.min_bit_len)/8.0)))
+}@
+@##############################
+@# Main struct of message
+@##############################
+@{
+
+type_map = {'int8': 'int8_t',
+  'int16': 'int16_t',
+  'int32': 'int32_t',
+  'int64': 'int64_t',
+  'uint8': 'uint8_t',
+  'uint16': 'uint16_t',
+  'uint32': 'uint32_t',
+  'uint64': 'uint64_t',
+  'float32': 'float',
+  'float64': 'double',
+  'float16': 'float16_t',
+  'bool': 'bool',
+  'char': 'char'}
+
+# Function to print a standard ros type
+def print_field_def(field):
+  type = field.type
+  if type == 'void':
+    return
+  # detect embedded types
+  array_size = ''
+  sl_pos = type.find('/')
+  type_appendix = ''
+  type_prefix = ''
+  if (sl_pos >= 0):
+    type = type[sl_pos + 1:]
+    type_prefix = 'struct '
+
+  if field.array_size > 0:
+    array_size = "[%d]" % field.array_size
+
+  if type in type_map:
+    # need to add _t: int8 --> int8_t
+    type_canard = type_map[type]
+  else:
+    #search through registered_packages
+    dep_field = msg_context._dependencies[spec.full_name]
+    if field.type in dep_field:
+      package, base_type = field.type.split('/')
+      type_canard = msg_context._registered_packages[package][base_type].short_name
+    else:
+      raise Exception("Type {0} not supported, add to to template file!".format(type))
+
+  print('\t%s%s%s %s%s;'%(type_prefix, type_canard, type_appendix, field.name, array_size))
+
+def print_field_encode(field):
+  offset_append = ""
+  offset = 0
+  for field in spec.parsed_fields():
+    if (not field.is_header):
+      if field.type == 'void':
+        offset += field.bit_size
+        continue
+      print('\n\t//Packing %s %s' % (field.type, field.name))
+      if field.array_size == 0:
+        if field == spec.parsed_fields()[-2] and\
+           spec.parsed_fields()[-1].darray_flag and\
+           spec.parsed_fields()[-1].tao_flag == 1:
+          #this might be length of tail array
+          print('\t%s_t tail_array_offset = 0;' % field.type)
+          print('\tif(!tao_mode) {')
+          print('\t\tcanardEncodeScalar(buffer, %s%d, %d, &msg->%s);'
+                %(offset_append, offset, field.bit_size, field.name))
+          print('\t\ttail_array_offset = %d;' % field.bit_size)
+          print('\t}')
+          offset_append += "tail_array_offset + "
+        elif field.type.find('/') > 0:
+          #handle custom type
+          field_type_name = field.type.split('/')[1]
+          field_len = field.name + '_len'
+          print('\tuint8_t %s_buf[UAVCAN_%s_MAX_PACK_SIZE];' 
+            % (field.name, field.type.split('/')[1].upper()))
+          print('\tuint32_t %s = make%s(%s_buf, &msg->%s, false);'
+          % (field_len, field.type,field.type.split('/')[1], field.name))
+          print('\tcanardEncodeScalar(buffer, %s%d, %s, %s_buf);'
+                %(offset_append, offset, field_len, field.name))
+          offset_append += field_len + " + "
+        else:
+          print('\tcanardEncodeScalar(buffer, %s%d, %d, &msg->%s);'
+                %(offset_append, offset, field.bit_size, field.name))
+          offset += field.bit_size
+      elif not field.darray_flag:
+        if field.type.find('/') > 0:
+          #handle custom type static arrays
+          field_type_name = field.type.split('/')[1]
+          field_len = field.name + '_len'
+          field_ulen = field.name + '_ulen'
+          print('\tuint8_t %s_buf[UAVCAN_%s_MAX_PACK_SIZE];' 
+              % (field.name, field.type.split('/')[1].upper()))
+          print('\tuint32_t %s = 0;'% field_len)
+          print('\tuint32_t %s;'% field_ulen)
+          offset_append += field_len + " + "
+          print('\tfor (uint16_t cnt = 0; cnt < %d; cnt++) {' % field.array_size)
+          print('\t\t%s = make%s(%s_buf, &msg->%s, false);'
+                % (field_ulen, field_type_name,field.type.split('/')[1], field.name))
+          print('\t\tcanardEncodeScalar(buffer, %s%d, %s, %s_buf);'
+                %(offset_append, offset, field_ulen, field.name))
+          print('\t\t%s += %s;' % (field_len,field_ulen))
+          print('\t}')
+        else:  
+          print('\tfor (uint16_t cnt = 0; cnt < %d; cnt++) {' % field.array_size)
+          print('\t\tcanardEncodeScalar(buffer, %scnt*%d + %d, %d, &msg->%s);'
+            %(offset_append, field.bit_size, offset, field.bit_size, field.name))
+          print('\t}')
+          offset += field.bit_size*field.array_size
+      else:
+        if field.type.find('/') > 0 and field.tao_flag != 3:
+          #handle custom type static arrays
+          field_type_name = field.type.split('/')[1]
+          field_len = field.name + '_len'
+          field_ulen = field.name + '_ulen'
+          print('\tuint8_t %s_buf[UAVCAN_%s_MAX_PACK_SIZE];' 
+              % (field.name, field.type.split('/')[1].upper()))
+          print('\tuint32_t %s = 0;'% field_len)
+          print('\tuint32_t %s;'% field_ulen)
+          offset_append += field_len + " + "
+          print('\tassert(msg->%s_len <= %d);' % (field.name, field.array_size))
+          print('\tfor (uint16_t cnt = 0; cnt < msg->%s_len; cnt++) {' % field.name)
+          print('\t\t%s = make%s(%s_buf, &msg->%s, false);'
+                % (field_ulen, field_type_name,field.type.split('/')[1], field.name))
+          print('\t\tcanardEncodeScalar(buffer, %s%d, %s, %s_buf);'
+                %(offset_append, offset, field_ulen, field.name))
+          print('\t\t%s += %s;' % (field_len,field_ulen))
+          print('\t}')
+        elif field.tao_flag == 3:
+          field_type_name = field.type.split('/')[1]
+          field_len = field.name + '_len'
+          field_ulen = field.name + '_ulen'
+          print('\tuint8_t %s_buf[UAVCAN_%s_MAX_PACK_SIZE];' 
+              % (field.name, field.type.split('/')[1].upper()))
+          print('\tuint32_t %s = 0;'% field_len)
+          print('\tuint32_t %s;'% field_ulen)
+          offset_append += field_len + " + "
+          print('\tassert(msg->%s_len <= %d);' % (field.name, field.array_size))
+          print('\tfor (uint16_t cnt = 0; cnt < msg->%s_len - 1; cnt++) {' % field.name)
+          print('\t\t%s = make%s(%s_buf, &msg->%s[cnt], false);'
+                % (field_ulen, field_type_name,field.type.split('/')[1], field.name))
+          print('\t\tcanardEncodeScalar(buffer, %s%d, %s, %s_buf);'
+                %(offset_append, offset, field_ulen, field.name))
+          print('\t\t%s += %s;' % (field_len,field_ulen))
+          print('\t}')
+
+          print('\t%s = make%s(%s_buf, &msg->%s, tao_mode);'
+                % (field_ulen, field_type_name,field.type.split('/')[1], field.name))
+          print('\tcanardEncodeScalar(buffer, %s%d, %s, %s_buf[msg->%s_len - 1]);'
+                %(offset_append, offset, field_ulen, field.name, field.name))
+          print('\t%s += %s;' % (field_len,field_ulen))
+
+        else:
+          print('\tassert(msg->%s_len <= %d);' % (field.name, field.array_size))
+          print('\tfor (uint16_t cnt = 0; cnt < msg->%s_len; cnt++) {' % field.name)
+          print('\t\tcanardEncodeScalar(buffer, %scnt*%d + %d, %d, &msg->%s[cnt]);'
+            %(offset_append, field.bit_size, offset, field.bit_size, field.name))
+          print('\t}')
+          offset_append += "msg->%s_len*%d + " % (field.name, field.bit_size)
+  print('\n\treturn %s%d;' % (offset_append, offset))
+}
+
+#ifdef __cplusplus
+@#class @(canard_struct) {
+struct __EXPORT @(canard_struct) {
+@#public:
+#else
+struct @(canard_struct) {
+#endif
+@{
+# loop over all fields and print the type and name
+for field in spec.parsed_fields():
+  if (not field.is_header):
+    print_field_def(field)
+}@
+};
+
+
+uint32_t make@(canard_struct)(uint8_t buffer[], @(canard_struct) *msg, bool& tao_mode)
+{
+@{
+print "\tmemset(buffer, 0, UAVCAN_%s_MAX_PACK_SIZE);" % spec.short_name.upper()
+print_field_encode(spec.parsed_fields())
+}@
+}
