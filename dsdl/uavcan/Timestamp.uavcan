@@ -6,4 +6,4 @@
 #
 
 uint56 UNKNOWN = 0
-truncated uint56 usec     # Microseconds
+uint56 usec     # Microseconds
