@@ -20,7 +20,6 @@
 @{
 import genmsg.msgs
 from math import ceil
-
 canard_struct = '%s'%spec.short_name
 topic_name = spec.short_name
 offset = 0
@@ -32,6 +31,9 @@ offset = 0
 @# Generic Includes
 @##############################
 #include <stdint.h>
+@[for dependency in msg_context._dependencies[spec.full_name]]@
+#include <@(dependency).h>
+@[end for]
 
 @# Constants c style
 
@@ -39,8 +41,10 @@ offset = 0
 #define @(constant.name) @(int(constant.val))
 @[end for]
 @{
-print "#define uint64 UAVCAN_%s_MAX_PACK_SIZE %d" % (spec.short_name.upper(),int(ceil(float(spec.max_bit_len)/8.0)))
-print "#define uint64 UAVCAN_%s_MIN_PACK_SIZE %d" % (spec.short_name.upper(), int(ceil(float(spec.min_bit_len)/8.0)))
+print "#define %s_MAX_PACK_SIZE %d" % (spec.short_name.upper(),int(ceil(float(spec.max_bit_len)/8.0)))
+print "#define %s_MIN_PACK_SIZE %d" % (spec.short_name.upper(), int(ceil(float(spec.min_bit_len)/8.0)))
+if spec.id is not None:
+  print "#define %s_MSG_ID %s" % (spec.short_name.upper(), spec.id)
 }@
 @##############################
 @# Main struct of message
@@ -85,8 +89,7 @@ def print_field_def(field):
     #search through registered_packages
     dep_field = msg_context._dependencies[spec.full_name]
     if field.type in dep_field:
-      package, base_type = field.type.split('/')
-      type_canard = msg_context._registered_packages[package][base_type].short_name
+      type_canard = field.type.replace('/','_')
     else:
       raise Exception("Type {0} not supported, add to to template file!".format(type))
 
@@ -102,9 +105,9 @@ def print_field_encode(field):
         continue
       print('\n\t//Packing %s %s' % (field.type, field.name))
       if field.array_size == 0:
-        if field == spec.parsed_fields()[-2] and\
-           spec.parsed_fields()[-1].darray_flag and\
-           spec.parsed_fields()[-1].tao_flag == 1:
+        if spec.parsed_fields()[-1].darray_flag and\
+           spec.parsed_fields()[-1].tao_flag == 1 and\
+           field == spec.parsed_fields()[-2]:
           #this might be length of tail array
           print('\t%s_t tail_array_offset = 0;' % field.type)
           print('\tif(!tao_mode) {')
@@ -119,8 +122,8 @@ def print_field_encode(field):
           field_len = field.name + '_len'
           print('\tuint8_t %s_buf[UAVCAN_%s_MAX_PACK_SIZE];' 
             % (field.name, field.type.split('/')[1].upper()))
-          print('\tuint32_t %s = make%s(%s_buf, &msg->%s, false);'
-          % (field_len, field.type,field.type.split('/')[1], field.name))
+          print('\tuint32_t %s = make_%s(%s_buf, &msg->%s, false);'
+          % (field_len, field.type.replace('/','_'),field.type.split('/')[1], field.name))
           print('\tcanardEncodeScalar(buffer, %s%d, %s, %s_buf);'
                 %(offset_append, offset, field_len, field.name))
           offset_append += field_len + " + "
@@ -140,8 +143,8 @@ def print_field_encode(field):
           print('\tuint32_t %s;'% field_ulen)
           offset_append += field_len + " + "
           print('\tfor (uint16_t cnt = 0; cnt < %d; cnt++) {' % field.array_size)
-          print('\t\t%s = make%s(%s_buf, &msg->%s, false);'
-                % (field_ulen, field_type_name,field.type.split('/')[1], field.name))
+          print('\t\t%s = make_%s(%s_buf, &msg->%s, false);'
+                % (field_ulen, field_type_name.replace('/','_'),field.type.split('/')[1], field.name))
           print('\t\tcanardEncodeScalar(buffer, %s%d, %s, %s_buf);'
                 %(offset_append, offset, field_ulen, field.name))
           print('\t\t%s += %s;' % (field_len,field_ulen))
@@ -155,7 +158,7 @@ def print_field_encode(field):
       else:
         if field.type.find('/') > 0 and field.tao_flag != 3:
           #handle custom type static arrays
-          field_type_name = field.type.split('/')[1]
+          field_type_name = field.type.replace('/','_')
           field_len = field.name + '_len'
           field_ulen = field.name + '_ulen'
           print('\tuint8_t %s_buf[UAVCAN_%s_MAX_PACK_SIZE];' 
@@ -165,14 +168,14 @@ def print_field_encode(field):
           offset_append += field_len + " + "
           print('\tassert(msg->%s_len <= %d);' % (field.name, field.array_size))
           print('\tfor (uint16_t cnt = 0; cnt < msg->%s_len; cnt++) {' % field.name)
-          print('\t\t%s = make%s(%s_buf, &msg->%s, false);'
-                % (field_ulen, field_type_name,field.type.split('/')[1], field.name))
+          print('\t\t%s = make_%s(%s_buf, &msg->%s, false);'
+                % (field_ulen, field_type_name.replace('/','_'),field.name, field.name))
           print('\t\tcanardEncodeScalar(buffer, %s%d, %s, %s_buf);'
                 %(offset_append, offset, field_ulen, field.name))
           print('\t\t%s += %s;' % (field_len,field_ulen))
           print('\t}')
         elif field.tao_flag == 3:
-          field_type_name = field.type.split('/')[1]
+          field_type_name = field.type.replace('/','_')
           field_len = field.name + '_len'
           field_ulen = field.name + '_ulen'
           print('\tuint8_t %s_buf[UAVCAN_%s_MAX_PACK_SIZE];' 
@@ -182,15 +185,15 @@ def print_field_encode(field):
           offset_append += field_len + " + "
           print('\tassert(msg->%s_len <= %d);' % (field.name, field.array_size))
           print('\tfor (uint16_t cnt = 0; cnt < msg->%s_len - 1; cnt++) {' % field.name)
-          print('\t\t%s = make%s(%s_buf, &msg->%s[cnt], false);'
-                % (field_ulen, field_type_name,field.type.split('/')[1], field.name))
+          print('\t\t%s = make_%s(%s_buf, &msg->%s[cnt], false);'
+                % (field_ulen, field_type_name.replace('/','_'),field.name, field.name))
           print('\t\tcanardEncodeScalar(buffer, %s%d, %s, %s_buf);'
                 %(offset_append, offset, field_ulen, field.name))
           print('\t\t%s += %s;' % (field_len,field_ulen))
           print('\t}')
 
-          print('\t%s = make%s(%s_buf, &msg->%s, tao_mode);'
-                % (field_ulen, field_type_name,field.type.split('/')[1], field.name))
+          print('\t%s = make_%s(%s_buf, &msg->%s, tao_mode);'
+                % (field_ulen, field_type_name.replace('/','_'),field.type.split('/')[1], field.name))
           print('\tcanardEncodeScalar(buffer, %s%d, %s, %s_buf[msg->%s_len - 1]);'
                 %(offset_append, offset, field_ulen, field.name, field.name))
           print('\t%s += %s;' % (field_len,field_ulen))
@@ -221,7 +224,7 @@ for field in spec.parsed_fields():
 };
 
 
-uint32_t make@(canard_struct)(uint8_t buffer[], @(canard_struct) *msg, bool& tao_mode)
+uint32_t make_@(canard_struct)(uint8_t buffer[], @(canard_struct) *msg, bool& tao_mode)
 {
 @{
 print "\tmemset(buffer, 0, UAVCAN_%s_MAX_PACK_SIZE);" % spec.short_name.upper()

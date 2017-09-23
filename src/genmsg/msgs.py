@@ -238,7 +238,7 @@ class MsgSpec(object):
 
     def __init__(self, types, names, constants, text, full_name, max_bit_len, min_bit_len,
         bit_sizes=[], array_sizes=[], tao_flags=[], darray_flags=[],
-        package = '', short_name = ''):
+        package = '', short_name = '', id = None):
         """
         :param types: list of field types, in order of declaration, ``[str]``
         :param names: list of field names, in order of declaration, ``[str]``
@@ -273,6 +273,7 @@ class MsgSpec(object):
         self.darray_flags = darray_flags
         self.max_bit_len = max_bit_len
         self.min_bit_len = min_bit_len
+        self.id = id
         try:
             self._parsed_fields = []
             for (name, type, bit_size, array_size, tao_flag, darray_flag) in\

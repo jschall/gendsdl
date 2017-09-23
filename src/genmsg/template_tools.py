@@ -56,7 +56,7 @@ def _generate_from_spec(input_file, output_dir, template_dir, msg_context, spec,
     # Loop over all files to generate
     for template_file_name, output_file_name in template_map.items():
         template_file = os.path.join(template_dir, template_file_name)
-        output_file = os.path.join(output_dir, output_file_name.replace("@NAME@", spec.short_name))
+        output_file = os.path.join(output_dir, output_file_name.replace("@NAME@", spec.short_name.split('_')[-1]))
 
         #print "generate_from_template %s %s %s" % (input_file, template_file, output_file)
 
@@ -131,10 +131,10 @@ def _generate_srv_from_file(input_file, output_dir, template_dir, search_path, p
                         search_path)
 
 # uniform interface for genering either srv or msg files
-def generate_from_file(input_file, package_name, output_dir, template_dir, include_path, msg_template_dict, srv_template_dict):
+def generate_from_file(root_directory, input_file, package_name, output_dir, template_dir, include_path, msg_template_dict, srv_template_dict):
     # Normalize paths
-    input_file = os.path.abspath(input_file)
-    output_dir = os.path.abspath(output_dir)
+    output_dir = os.path.abspath(os.path.join(output_dir, os.path.dirname(input_file)))
+    input_file = os.path.abspath(os.path.join(root_directory, input_file))
 
     # Create output dir
     try:

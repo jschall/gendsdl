@@ -31,7 +31,7 @@
 # POSSIBILITY OF SUCH DAMAGE.
 
 PRN_SEPARATOR = '/'
-
+ID_SEPARATOR = '.'
 import re
 
 def normalize_package_context(package_context):
@@ -102,13 +102,16 @@ def package_resource_name(name):
     """    
     if PRN_SEPARATOR in name:
         val = tuple(name.split(PRN_SEPARATOR))
-        if len(val) != 2:
-            raise ValueError("invalid name [%s]"%name)
-        else:
-            return val
+        return ('/'.join(val[:-1]), val[-1])
     else:
         return '', name
 
+def package_id_name(name):
+    if ID_SEPARATOR in name:
+        val = tuple(name.split(ID_SEPARATOR))
+        return val
+    else:
+        return None, name
 ################################################################################
 # NAME VALIDATORS
 

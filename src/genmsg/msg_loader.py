@@ -52,7 +52,7 @@ from . base import InvalidMsgSpec, log, SEP, COMMENTCHAR, CONSTCHAR, IODELIM, EX
 from . msgs import MsgSpec, TIME, TIME_MSG, DURATION, DURATION_MSG, HEADER, HEADER_FULL_NAME, \
      is_builtin, is_valid_msg_field_name, is_valid_msg_type, bare_msg_type, is_valid_constant_type, \
      Field, Constant, resolve_type
-from . names import normalize_package_context, package_resource_name
+from . names import normalize_package_context, package_resource_name, package_id_name
 from . srvs import SrvSpec
 
 class MsgNotFound(Exception):
@@ -76,7 +76,10 @@ def get_msg_file(package, base_type, search_path, ext=EXT_MSG):
     :returns: filesystem path of requested file, ``str``
     :raises: :exc:`MsgNotFound` If message cannot be located.
     """
-    print("msg_file(%s, %s, %s)" % (package, base_type, str(search_path)))
+    if '.' in base_type:
+        package = '/'.join(base_type.split('.')[:-1])
+        base_type = base_type.split('.')[-1]
+
     if not isinstance(search_path, dict):
         raise ValueError("search_path must be a dictionary of {namespace: dirpath}")
     if not package in search_path:
@@ -191,6 +194,7 @@ def _load_constant_line(orig_line):
     :raises: :exc:`InvalidMsgSpec`
     """
     clean_line = _strip_comments(orig_line)
+    (clean_line, bit_len_str, bit_len_num) = proc_scalar(clean_line, True)
     line_splits = [s for s in [x.strip() for x in clean_line.split(" ")] if s] #split type/name, filter out empties
     field_type = line_splits[0]
     if not is_valid_constant_type(field_type):
@@ -225,6 +229,8 @@ def _load_field_line(orig_line, package_context):
     if len(line_splits) != 2:
         raise InvalidMsgSpec("Invalid declaration: %s"%(orig_line))
     field_type, name = line_splits
+    field_type = field_type.replace('.','/')
+
     if not is_valid_msg_field_name(name):
         raise InvalidMsgSpec("%s is not a legal message field name"%name)
     if not is_valid_msg_type(field_type):
@@ -262,32 +268,45 @@ def proc_array(clean_line):
     
     return (clean_line, array_size, is_dynamic_array)
 
-def proc_scalar(clean_line, short_name):
+def proc_scalar(clean_line, is_constant_type):
     bit_len_str = ""
     bit_len_num = 0
-
-    if clean_line.find('int') >= 0:
+    field_val = ''
+    field_type = clean_line.split(' ')[0]
+    if field_type.find('int') >= 0:
         if clean_line.find('uint') == 0:
-            bit_len, field = [s for s in [x.strip() for x in clean_line[4:].split(" ")] if s]
+            if is_constant_type:
+                bit_len, field, equals, field_val = [s for s in [x.strip() for x in clean_line[4:].split(" ")] if s]
+                field_val = ' = ' + field_val
+            else:
+                bit_len, field = [s for s in [x.strip() for x in clean_line[4:].split(" ")] if s]
+            field_type = 'uint'
         else:
-            bit_len, field = [s for s in [x.strip() for x in clean_line[3:].split(" ")] if s]
+            if is_constant_type:
+                bit_len, field, field_val = [s for s in [x.strip() for x in clean_line[3:].split(" ")] if s]
+            else:
+                bit_len, field = [s for s in [x.strip() for x in clean_line[3:].split(" ")] if s]
+            field_type = 'int'
         bit_len_num = int(bit_len)
         if bit_len_num != 8 and bit_len_num != 16 and bit_len_num != 32 and bit_len_num != 64:
             if bit_len_num < 8:
-                clean_line = "uint8 " + field
+                clean_line = field_type + "8 " + field + field_val
                 #bit_len_str = "uint8 %s_%s_BITLEN = %s" % (short_name.upper(),field.upper(), bit_len_num)
             elif bit_len_num < 16:
-                clean_line = "uint16 " + field
+                clean_line = field_type + "16 " + field + field_val
                 #bit_len_str = "uint8 %s_%s_BITLEN = %s" % (short_name.upper(),field.upper(), bit_len_num)
             elif bit_len_num < 32:
-                clean_line = "uint32 " + field
+                clean_line = field_type + "32 " + field + field_val
                 #bit_len_str = "uint8 %s_%s_BITLEN = %s" % (short_name.upper(),field.upper(), bit_len_num)
             elif bit_len_num < 64:
-                clean_line = "uint64 " + field
+                clean_line = field_type + "64 " + field + field_val
                 #bit_len_str = "uint8 %s_%s_BITLEN = %s" % (short_name.upper(),field.upper(), bit_len_num)
-    elif clean_line.find('float') >= 0 :
-        bit_len, field = [s for s in [x.strip() for x in clean_line[5:].split(" ")] if s]
-        bit_len_num = int(bit_len)
+    elif field_type.find('float') >= 0 :
+        if not is_constant_type:
+            bit_len, field = [s for s in [x.strip() for x in clean_line[5:].split(" ")] if s]
+            bit_len_num = int(bit_len)
+    elif field_type.find('bool') >= 0:
+            bit_len_num = 1
     return (clean_line, bit_len_str, bit_len_num)
 
 def load_msg_from_string(msg_context, text, full_name):
@@ -303,6 +322,9 @@ def load_msg_from_string(msg_context, text, full_name):
     """
     print("load_msg_from_string", full_name)
     package_name, short_name = package_resource_name(full_name)
+    id, short_name = package_id_name(short_name)
+    full_name = '/'.join([package_name,short_name])
+    short_name = full_name.replace('/','_')
     types = []
     names = []
     constants = []
@@ -314,19 +336,21 @@ def load_msg_from_string(msg_context, text, full_name):
     is_dynamic_array = True
     max_bit_len = 0
     min_bit_len = 0
+    reserved_cnt = 0
     for orig_line in text.split('\n'):
         clean_line = _strip_comments(orig_line)
         if not clean_line:
             continue #ignore empty lines
         if CONSTCHAR in clean_line and '<' not in clean_line:
             constants.append(_load_constant_line(orig_line))
-        else:         
+        else:
             if clean_line.find('void') >= 0:
                 void_len = int(clean_line[4:])
                 bit_sizes.append(void_len)
                 array_sizes.append(0)
                 types.append('void')
-                names.append('')
+                names.append('reserved%d'%reserved_cnt)
+                reserved_cnt += 1
                 tao_flags.append(0)
                 darray_flags.append(False)
                 max_bit_len += void_len
@@ -336,7 +360,7 @@ def load_msg_from_string(msg_context, text, full_name):
             clean_line, array_size, is_dynamic_array = proc_array(clean_line)
 
             #fetch scalar details
-            clean_line, bit_len_str, bit_len_num = proc_scalar(clean_line, short_name)
+            clean_line, bit_len_str, bit_len_num = proc_scalar(clean_line, False)
             #if bit_len_str != "":
             #    constants.append(_load_constant_line(bit_len_str))
 
@@ -346,7 +370,7 @@ def load_msg_from_string(msg_context, text, full_name):
                 da_clean_line = "uint%d %s_len" % (ceil(numpy.log2(int(array_size)+1)), name)
                 da_array_size = 0
                 da_is_dynamic_array = False
-                da_clean_line, da_bit_len_str, da_bit_len_num = proc_scalar(da_clean_line, short_name)
+                da_clean_line, da_bit_len_str, da_bit_len_num = proc_scalar(da_clean_line, False)
                 #if da_bit_len_str != "":
                 #    constants.append(_load_constant_line(da_bit_len_str))
                 da_field_type, da_name = _load_field_line(da_clean_line, package_name)
@@ -379,7 +403,7 @@ def load_msg_from_string(msg_context, text, full_name):
         tao_flags[-1] = 1
 
     spec = MsgSpec(types, names, constants, text, full_name, max_bit_len, min_bit_len,
-                   bit_sizes, array_sizes, tao_flags, darray_flags, package_name)
+                   bit_sizes, array_sizes, tao_flags, darray_flags, package_name, short_name, id)
     msg_context.register(full_name, spec)
     return spec
 
@@ -519,8 +543,7 @@ class MsgContext(object):
     def create_default():
         msg_context = MsgContext()
         # register builtins (needed for serialization).  builtins have no package.
-        load_msg_from_string(msg_context, TIME_MSG, TIME)
-        load_msg_from_string(msg_context, DURATION_MSG, DURATION)
+        # Currently None
         return msg_context
         
     def register(self, full_msg_type, msgspec):
