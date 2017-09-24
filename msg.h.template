@@ -95,7 +95,15 @@ def print_field_def(field):
 
   print('\t%s%s%s %s%s;'%(type_prefix, type_canard, type_appendix, field.name, array_size))
 
-def print_field_encode(field):
+
+def print_encode_scalar(tabs, offset, field_len, field_name):
+  print('%scanardEncodeScalar(buffer, %s, %s, %s);'% (tabs, offset, field_len, field_name))
+
+def print_encode_custom_types(tabs, field_len, field_type, field_name, tao_enable):
+  print('%s%s = encode_%s(%s_buf, &msg->%s, %s);'
+        %(tabs, field_len, field_type, field_name, field_name, tao_enable))
+
+def print_field_encode_decode(field, do_encode):
   offset_append = ""
   offset = 0
   for field in spec.parsed_fields():
@@ -111,8 +119,7 @@ def print_field_encode(field):
           #this might be length of tail array
           print('\t%s_t tail_array_offset = 0;' % field.type)
           print('\tif(!tao_mode) {')
-          print('\t\tcanardEncodeScalar(buffer, %s%d, %d, &msg->%s);'
-                %(offset_append, offset, field.bit_size, field.name))
+          print_encode_scalar('\t\t', offset_append+str(offset), str(field.bit_size), field.name)
           print('\t\ttail_array_offset = %d;' % field.bit_size)
           print('\t}')
           offset_append += "tail_array_offset + "
@@ -121,11 +128,9 @@ def print_field_encode(field):
           field_type_name = field.type.split('/')[1]
           field_len = field.name + '_len'
           print('\tuint8_t %s_buf[UAVCAN_%s_MAX_PACK_SIZE];' 
-            % (field.name, field.type.split('/')[1].upper()))
-          print('\tuint32_t %s = make_%s(%s_buf, &msg->%s, false);'
-          % (field_len, field.type.replace('/','_'),field.type.split('/')[1], field.name))
-          print('\tcanardEncodeScalar(buffer, %s%d, %s, %s_buf);'
-                %(offset_append, offset, field_len, field.name))
+            % (field.name, field.type.replace('/','_').upper()))
+          print_encode_custom_types('\t', 'uint32 ' + field_len, field.type.replace('/','_'), field.name, 'false')
+          print_encode_scalar('\t', offset_append+str(offset), field_len, field.name+'_buf')
           offset_append += field_len + " + "
         else:
           print('\tcanardEncodeScalar(buffer, %s%d, %d, &msg->%s);'
@@ -143,16 +148,14 @@ def print_field_encode(field):
           print('\tuint32_t %s;'% field_ulen)
           offset_append += field_len + " + "
           print('\tfor (uint16_t cnt = 0; cnt < %d; cnt++) {' % field.array_size)
-          print('\t\t%s = make_%s(%s_buf, &msg->%s, false);'
-                % (field_ulen, field_type_name.replace('/','_'),field.type.split('/')[1], field.name))
-          print('\t\tcanardEncodeScalar(buffer, %s%d, %s, %s_buf);'
-                %(offset_append, offset, field_ulen, field.name))
+          print_encode_custom_types('\t\t', field_ulen, field_type_name.replace('/','_')+'[cnt]', field.name, 'false')
+          print_encode_scalar('\t\t', offset_append+str(offset), field_ulen, field.name+'_buf')
           print('\t\t%s += %s;' % (field_len,field_ulen))
           print('\t}')
         else:  
           print('\tfor (uint16_t cnt = 0; cnt < %d; cnt++) {' % field.array_size)
-          print('\t\tcanardEncodeScalar(buffer, %scnt*%d + %d, %d, &msg->%s);'
-            %(offset_append, field.bit_size, offset, field.bit_size, field.name))
+          print_encode_scalar('\t\t',offset_append+'cnt*'+str(field.bit_size)+' + ' +str(offset),\
+                              str(field.bit_size), '&msg->'+field.name)
           print('\t}')
           offset += field.bit_size*field.array_size
       else:
@@ -168,10 +171,8 @@ def print_field_encode(field):
           offset_append += field_len + " + "
           print('\tassert(msg->%s_len <= %d);' % (field.name, field.array_size))
           print('\tfor (uint16_t cnt = 0; cnt < msg->%s_len; cnt++) {' % field.name)
-          print('\t\t%s = make_%s(%s_buf, &msg->%s, false);'
-                % (field_ulen, field_type_name.replace('/','_'),field.name, field.name))
-          print('\t\tcanardEncodeScalar(buffer, %s%d, %s, %s_buf);'
-                %(offset_append, offset, field_ulen, field.name))
+          print_encode_custom_types('\t\t', field_ulen, field_type_name.replace('/','_')+'[cnt]', field.name, 'false')
+          print_encode_scalar('\t\t' ,offset_append+str(offset), field_ulen, field.name+'_buf')
           print('\t\t%s += %s;' % (field_len,field_ulen))
           print('\t}')
         elif field.tao_flag == 3:
@@ -184,25 +185,23 @@ def print_field_encode(field):
           print('\tuint32_t %s;'% field_ulen)
           offset_append += field_len + " + "
           print('\tassert(msg->%s_len <= %d);' % (field.name, field.array_size))
-          print('\tfor (uint16_t cnt = 0; cnt < msg->%s_len - 1; cnt++) {' % field.name)
-          print('\t\t%s = make_%s(%s_buf, &msg->%s[cnt], false);'
-                % (field_ulen, field_type_name.replace('/','_'),field.name, field.name))
-          print('\t\tcanardEncodeScalar(buffer, %s%d, %s, %s_buf);'
-                %(offset_append, offset, field_ulen, field.name))
+          print('uint16_t cnt;')
+          print('\tfor (cnt = 0; cnt < msg->%s_len - 1; cnt++) {' % field.name)
+          print_encode_custom_types('\t\t', field_ulen, field_type_name.replace('/','_')+'[cnt]', field.name, 'false')
+          print_encode_scalar('\t\t', offset_append+str(offset), field_ulen, field.name+'_buf')
           print('\t\t%s += %s;' % (field_len,field_ulen))
           print('\t}')
 
-          print('\t%s = make_%s(%s_buf, &msg->%s, tao_mode);'
-                % (field_ulen, field_type_name.replace('/','_'),field.type.split('/')[1], field.name))
-          print('\tcanardEncodeScalar(buffer, %s%d, %s, %s_buf[msg->%s_len - 1]);'
-                %(offset_append, offset, field_ulen, field.name, field.name))
+          print_encode_custom_types('\t\t', field_ulen, field_type_name.replace('/','_')+'[cnt]', field.name, 'false')
+          print_encode_scalar(offset_append, offset+str(field_ulen),
+                              '%s_buf[msg->%s_len - 1]'%(field.name, field.name))
           print('\t%s += %s;' % (field_len,field_ulen))
 
         else:
           print('\tassert(msg->%s_len <= %d);' % (field.name, field.array_size))
           print('\tfor (uint16_t cnt = 0; cnt < msg->%s_len; cnt++) {' % field.name)
-          print('\t\tcanardEncodeScalar(buffer, %scnt*%d + %d, %d, &msg->%s[cnt]);'
-            %(offset_append, field.bit_size, offset, field.bit_size, field.name))
+          print_encode_scalar('\t\t', offset_append+'cnt*'+str(field.bit_size)+' + ' + str(offset),str(field.bit_size),
+                              '&msg->%s[cnt]'%field.name)
           print('\t}')
           offset_append += "msg->%s_len*%d + " % (field.name, field.bit_size)
   print('\n\treturn %s%d;' % (offset_append, offset))
@@ -224,10 +223,10 @@ for field in spec.parsed_fields():
 };
 
 
-uint32_t make_@(canard_struct)(uint8_t buffer[], @(canard_struct) *msg, bool& tao_mode)
+uint32_t encode_@(canard_struct)(uint8_t buffer[], @(canard_struct) *msg, bool& tao_mode)
 {
 @{
 print "\tmemset(buffer, 0, UAVCAN_%s_MAX_PACK_SIZE);" % spec.short_name.upper()
-print_field_encode(spec.parsed_fields())
+print_field_encode_decode(spec.parsed_fields(), True)
 }@
 }
