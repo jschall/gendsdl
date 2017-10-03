@@ -31,7 +31,8 @@
 # POSSIBILITY OF SUCH DAMAGE.
 
 from __future__ import print_function
-
+import re
+import glob
 """
 Loader for messages and :class:`MsgContext` that assumes a
 dictionary-based search path scheme (keys are the package/namespace,
@@ -54,7 +55,7 @@ from . msgs import MsgSpec, TIME, TIME_MSG, DURATION, DURATION_MSG, HEADER, HEAD
      Field, Constant, resolve_type
 from . names import normalize_package_context, package_resource_name, package_id_name
 from . srvs import SrvSpec
-
+from . signature import Signature, compute_signature, bytes_from_crc64
 class MsgNotFound(Exception):
 
     def __init__(self, message, base_type=None, package=None, search_path=None):
@@ -87,7 +88,9 @@ def get_msg_file(package, base_type, search_path, ext=EXT_MSG):
                           % (base_type, package, search_path), base_type, package, search_path)
     else:
         for path_tmp in search_path[package]:
-            path = os.path.join(path_tmp, "%s%s"%(base_type, ext))
+            path = os.path.join(path_tmp, "*%s%s"%(base_type, ext))
+            match_list = glob.glob(path)
+            path = match_list[0]
             if os.path.isfile(path):
                 return path
         raise MsgNotFound("Cannot locate message [%s] in package [%s] with paths [%s]"%
@@ -180,7 +183,11 @@ def convert_constant_value(field_type, val):
         else:
             upper = int(math.pow(2, b-1)-1)   
             lower = -upper - 1 #two's complement min
-        val = int(val) #python will autocast to long if necessary
+        if val.find('\'') >= 0: #extract char constant
+            val = re.search('\'(.+?)\'', val).group(1)
+            val = ord(val.decode('string_escape'))
+        else:
+            val = int(val,0) #python will autocast to long if necessary
         if val > upper or val < lower:
             raise InvalidMsgSpec("cannot coerce [%s] to %s (out of bounds)"%(val, field_type))
         return val
@@ -194,7 +201,7 @@ def _load_constant_line(orig_line):
     :raises: :exc:`InvalidMsgSpec`
     """
     clean_line = _strip_comments(orig_line)
-    (clean_line, bit_len_str, bit_len_num) = proc_scalar(clean_line, True)
+    (_, clean_line, bit_len_str, bit_len_num, is_signed,_) = proc_scalar("", clean_line, True)
     line_splits = [s for s in [x.strip() for x in clean_line.split(" ")] if s] #split type/name, filter out empties
     field_type = line_splits[0]
     if not is_valid_constant_type(field_type):
@@ -252,6 +259,7 @@ def proc_array(clean_line):
     array_size = 0
     is_last_darray = False
     is_dynamic_array = False
+    normalized_line = clean_line
     if clean_line.find('[') >= 0:
         if clean_line.find('[<=') >= 0:
             array_size = int(clean_line[clean_line.find('[<=')+3:clean_line.find(']')])
@@ -260,19 +268,33 @@ def proc_array(clean_line):
         elif clean_line.find('[<') >= 0:
             array_size = int(clean_line[clean_line.find('[<')+2:clean_line.find(']')])
             array_size -= 1
+            normalized_line = re.sub(r'\[<(\d{1,2})$\]', '[<=%d]'%array_size, clean_line)
             clean_line = clean_line[:clean_line.find('[<')] + clean_line[clean_line.find(']')+1:]
             is_dynamic_array = True
         else:
             array_size =int(clean_line[clean_line.find('[')+1:clean_line.find(']')])
             clean_line = clean_line[:clean_line.find('[')] + clean_line[clean_line.find(']')+1:]
-    
-    return (clean_line, array_size, is_dynamic_array)
+    return (normalized_line, clean_line, array_size, is_dynamic_array)
 
-def proc_scalar(clean_line, is_constant_type):
+def proc_scalar(normalized_line, clean_line, is_constant_type):
     bit_len_str = ""
     bit_len_num = 0
     field_val = ''
+    is_signed = ''
+    is_saturated = False
     field_type = clean_line.split(' ')[0]
+    if field_type.find('truncated') >= 0:
+        saturated_cast_type = False
+        field_type = clean_line.split(' ')[1]
+        clean_line = ' '.join(clean_line.split(' ')[1:])
+    elif field_type.find('saturated') >= 0:
+        saturated_cast_type = True
+        field_type = clean_line.split(' ')[1]
+        clean_line = ' '.join(clean_line.split(' ')[1:])
+        is_saturated = True
+    elif field_type.find('int') >= 0 or field_type.find('float') >= 0 or field_type.find('bool') >= 0:
+        normalized_line = 'saturated ' + normalized_line
+        is_saturated = True
     if field_type.find('int') >= 0:
         if clean_line.find('uint') == 0:
             if is_constant_type:
@@ -281,12 +303,15 @@ def proc_scalar(clean_line, is_constant_type):
             else:
                 bit_len, field = [s for s in [x.strip() for x in clean_line[4:].split(" ")] if s]
             field_type = 'uint'
+            is_signed = 'false'
         else:
             if is_constant_type:
-                bit_len, field, field_val = [s for s in [x.strip() for x in clean_line[3:].split(" ")] if s]
+                bit_len, field, equals, field_val = [s for s in [x.strip() for x in clean_line[3:].split(" ")] if s]
+                field_val = ' = ' + field_val
             else:
                 bit_len, field = [s for s in [x.strip() for x in clean_line[3:].split(" ")] if s]
             field_type = 'int'
+            is_signed = 'true'
         bit_len_num = int(bit_len)
         if bit_len_num != 8 and bit_len_num != 16 and bit_len_num != 32 and bit_len_num != 64:
             if bit_len_num < 8:
@@ -305,9 +330,12 @@ def proc_scalar(clean_line, is_constant_type):
         if not is_constant_type:
             bit_len, field = [s for s in [x.strip() for x in clean_line[5:].split(" ")] if s]
             bit_len_num = int(bit_len)
+            is_signed = 'true'
     elif field_type.find('bool') >= 0:
             bit_len_num = 1
-    return (clean_line, bit_len_str, bit_len_num)
+            is_signed = 'false'
+
+    return (normalized_line, clean_line, bit_len_str, bit_len_num, is_signed, is_saturated)
 
 def load_msg_from_string(msg_context, text, full_name):
     """
@@ -332,18 +360,28 @@ def load_msg_from_string(msg_context, text, full_name):
     array_sizes = []
     tao_flags = []
     darray_flags = []
+    is_signed_flags = []
+    is_saturated_flags = []
     max_packet_size = 0
     is_dynamic_array = True
     max_bit_len = 0
     min_bit_len = 0
     reserved_cnt = 0
+    normalized_def = StringIO()
+    type = "struct"
+    normalized_def.write(full_name.replace('/','.') + '\n')
     for orig_line in text.split('\n'):
         clean_line = _strip_comments(orig_line)
+        is_signed = ''
         if not clean_line:
             continue #ignore empty lines
         if CONSTCHAR in clean_line and '<' not in clean_line:
             constants.append(_load_constant_line(orig_line))
         else:
+            if clean_line.find('union') >= 0:
+                type = "union"
+                normalized_def.write('@union\n')
+                continue
             if clean_line.find('void') >= 0:
                 void_len = int(clean_line[4:])
                 bit_sizes.append(void_len)
@@ -357,20 +395,28 @@ def load_msg_from_string(msg_context, text, full_name):
                 min_bit_len += void_len
                 continue
             #fetch and remove array size
-            clean_line, array_size, is_dynamic_array = proc_array(clean_line)
+            normalized_line, clean_line, array_size, is_dynamic_array = proc_array(clean_line)
 
             #fetch scalar details
-            clean_line, bit_len_str, bit_len_num = proc_scalar(clean_line, False)
+            normalized_line, clean_line, bit_len_str, bit_len_num, is_signed, is_saturated = proc_scalar(normalized_line, clean_line, False)
             #if bit_len_str != "":
             #    constants.append(_load_constant_line(bit_len_str))
 
             field_type, name = _load_field_line(clean_line, package_name)
+            if field_type.find('/') >= 0:
+                if is_dynamic_array:
+                    normalized_line = field_type.replace('/','.') + "[<=%d] "%array_size + name
+                elif array_size > 0:
+                    normalized_line = field_type.replace('/','.') + "[%d] "%array_size + name
+                else:
+                    normalized_line = field_type.replace('/','.') + " " + name
+            normalized_def.write(normalized_line + '\n')
 
             if is_dynamic_array:
                 da_clean_line = "uint%d %s_len" % (ceil(numpy.log2(int(array_size)+1)), name)
                 da_array_size = 0
                 da_is_dynamic_array = False
-                da_clean_line, da_bit_len_str, da_bit_len_num = proc_scalar(da_clean_line, False)
+                _, da_clean_line, da_bit_len_str, da_bit_len_num, is_signed, is_saturated = proc_scalar(normalized_line, da_clean_line, False)
                 #if da_bit_len_str != "":
                 #    constants.append(_load_constant_line(da_bit_len_str))
                 da_field_type, da_name = _load_field_line(da_clean_line, package_name)
@@ -380,13 +426,16 @@ def load_msg_from_string(msg_context, text, full_name):
                 names.append(da_name)
                 tao_flags.append(0)
                 darray_flags.append(False)
-            
+                is_signed_flags.append('false')
+                is_saturated_flags.append(is_saturated)
             bit_sizes.append(bit_len_num)
             array_sizes.append(array_size)
             types.append(field_type)
             names.append(name)
             tao_flags.append(0)
             darray_flags.append(is_dynamic_array)
+            is_signed_flags.append(is_signed)
+            is_saturated_flags.append(is_saturated)
             #accumulate bit lengths for default types
             if array_size > 0:
                 max_bit_len += array_size*bit_len_num
@@ -395,16 +444,19 @@ def load_msg_from_string(msg_context, text, full_name):
             else:
                 max_bit_len += bit_len_num
                 min_bit_len += bit_len_num
-    
-    #Check TAO conditions:
-    #1. The minimum bit length of an item type is not less than 8 bits.
-    #2. The array is the last field in the top-level data structure.
-    if is_dynamic_array and ((bit_sizes[-1] >= 8) or (field_type.find('/') > 0)):
-        tao_flags[-1] = 1
 
-    spec = MsgSpec(types, names, constants, text, full_name, max_bit_len, min_bit_len,
-                   bit_sizes, array_sizes, tao_flags, darray_flags, package_name, short_name, id)
-    msg_context.register(full_name, spec)
+    if len(constants) > 0 or len(names) > 0:
+        #Check TAO conditions:
+        #1. The minimum bit length of an item type is not less than 8 bits.
+        #2. The array is the last field in the top-level data structure.
+        if is_dynamic_array and ((field_type.find('/') > 0) or (bit_sizes[-1] >= 8)):
+            tao_flags[-1] = 1
+        spec = MsgSpec(normalized_def, types, names, constants, text, full_name, max_bit_len, min_bit_len,
+                       bit_sizes, array_sizes, tao_flags, darray_flags, is_signed_flags, is_saturated_flags, 
+                       package_name, short_name, id, type)
+        msg_context.register(full_name, spec)
+    else:
+        spec = None
     return spec
 
 def load_msg_from_file(msg_context, file_path, full_name):
@@ -437,8 +489,12 @@ def load_msg_depends(msg_context, spec, search_path):
     :returns: list of dependency names, ``[str]``
     :raises: :exc:`MsgNotFound` If dependency cannot be located.
     """
+    if spec == None:
+        return []
     package_context = spec.package
-    log("load_msg_depends <spec>", spec.full_name, package_context)
+    print("load_msg_depends <spec>", spec.full_name, package_context)
+    sig = Signature(compute_signature(spec.normalized_def.getvalue().strip().replace('\n\n\n', '\n').replace('\n\n', '\n')))
+
     depends = []
     # Iterate over each field, loading as necessary
     for unresolved_type in spec.types:
@@ -450,9 +506,17 @@ def load_msg_depends(msg_context, spec, search_path):
         # Retrieve the MsgSpec instance of the field
         if msg_context.is_registered(resolved_type):
             depspec = msg_context.get_registered(resolved_type)
+            sig_value = sig.get_value()
+            sig.add(bytes_from_crc64(depspec.signature))
+            sig.add(bytes_from_crc64(sig_value))
         else:
             # load and register on demand
             depspec = load_msg_by_type(msg_context, resolved_type, search_path)
+            if depspec is None:
+                print(spec._parsed_fields)
+                spec._parsed_fields = [field for field in spec._parsed_fields if field.type != resolved_type]
+                print(spec._parsed_fields)
+                continue
             msg_context.register(resolved_type, depspec)
 
         # Update dependencies
@@ -461,11 +525,16 @@ def load_msg_depends(msg_context, spec, search_path):
         dep_dependencies = msg_context.get_depends(resolved_type)
         if dep_dependencies is None:
             load_msg_depends(msg_context, depspec, search_path)
+            sig_value = sig.get_value()
+            sig.add(bytes_from_crc64(depspec.signature))
+            sig.add(bytes_from_crc64(sig_value))
+
         #fetch and update bit lengths from resolved dependencies
         spec.update_bit_length(depspec.min_bit_len, depspec.max_bit_len, unresolved_type)
     assert spec.full_name, "MsgSpec must have a properly set full name"
     msg_context.set_depends(spec.full_name, depends)
     # have to copy array in order to prevent inadvertent mutation (we've stored this list in set_dependencies)
+    spec.update_signature(sig.get_value())
     return depends[:]
             
 def load_depends(msg_context, spec, msg_search_path):
@@ -483,6 +552,8 @@ def load_depends(msg_context, spec, msg_search_path):
     :param msg_search_path: dictionary mapping message namespaces to a directory locations.
     :raises: :exc:`MsgNotFound` If dependency cannot be located.
     """
+    if spec is None:
+        return None
     if isinstance(spec, MsgSpec):
         return load_msg_depends(msg_context, spec, msg_search_path)
     elif isinstance(spec, SrvSpec):
@@ -596,6 +667,10 @@ def load_srv_from_string(msg_context, text, full_name):
     text_in  = StringIO()
     text_out = StringIO()
     accum = text_in
+
+    package_name, short_name = package_resource_name(full_name)
+    id, short_name = package_id_name(short_name)
+    full_name = '/'.join([package_name,short_name])
     for l in text.split('\n'):
         l = l.split(COMMENTCHAR)[0].strip() #strip comments        
         if l.startswith(IODELIM): #lenient, by request

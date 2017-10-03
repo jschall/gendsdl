@@ -102,8 +102,10 @@ def _compute_hash(msg_context, spec, hash):
     if isinstance(spec, MsgSpec):
         hash.update(compute_md5_text(msg_context, spec).encode())
     elif isinstance(spec, SrvSpec):
-        hash.update(compute_md5_text(msg_context, spec.request).encode())
-        hash.update(compute_md5_text(msg_context, spec.response).encode())
+        if spec.request is not None:
+            hash.update(compute_md5_text(msg_context, spec.request).encode())
+        if spec.response is not None:
+            hash.update(compute_md5_text(msg_context, spec.response).encode())
     else:
         raise Exception("[%s] is not a message or service"%spec)   
     return hash.hexdigest()

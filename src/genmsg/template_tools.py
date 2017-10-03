@@ -46,8 +46,8 @@ import genmsg.gentools
 # generate msg or srv files from a template file
 # template_map of the form { 'template_file':'output_file'} output_file can contain @NAME@ which will be replaced by the message/service name
 def _generate_from_spec(input_file, output_dir, template_dir, msg_context, spec, template_map, search_path):
-
-    md5sum = genmsg.gentools.compute_md5(msg_context, spec)
+    if spec is None:
+        return
 
     # precompute msg definition once
     if isinstance(spec, genmsg.msgs.MsgSpec):
@@ -66,7 +66,6 @@ def _generate_from_spec(input_file, output_dir, template_dir, msg_context, spec,
         g = {
             "file_name_in": input_file,
             "spec": spec,
-            "md5sum": md5sum,
             "search_path": search_path,
             "msg_context": msg_context
         }
@@ -151,7 +150,10 @@ def generate_from_file(root_directory, input_file, package_name, output_dir, tem
 
     # Generate the file(s)
     if input_file.endswith(".uavcan"):
-        _generate_msg_from_file(input_file, output_dir, template_dir, search_path, package_name, msg_template_dict)
+        if '\n---\n' in open(input_file).read():
+            _generate_srv_from_file(input_file, output_dir, template_dir, search_path, package_name, srv_template_dict, msg_template_dict)
+        else:
+            _generate_msg_from_file(input_file, output_dir, template_dir, search_path, package_name, msg_template_dict)
     else:
         assert False, "Unknown file extension for %s"%input_file
 

@@ -19,8 +19,8 @@
 
 @{
 import genmsg.msgs
-from math import ceil
-canard_struct = '%s'%spec.short_name
+from math import ceil, pow
+canard_name = '%s'%spec.short_name
 topic_name = spec.short_name
 offset = 0
 }@
@@ -31,6 +31,8 @@ offset = 0
 @# Generic Includes
 @##############################
 #include <stdint.h>
+#include <float16.h>
+#include <string.h>
 @[for dependency in msg_context._dependencies[spec.full_name]]@
 #include <@(dependency).h>
 @[end for]
@@ -41,10 +43,19 @@ offset = 0
 #define @(constant.name) @(int(constant.val))
 @[end for]
 @{
-print "#define %s_MAX_PACK_SIZE %d" % (spec.short_name.upper(),int(ceil(float(spec.max_bit_len)/8.0)))
-print "#define %s_MIN_PACK_SIZE %d" % (spec.short_name.upper(), int(ceil(float(spec.min_bit_len)/8.0)))
+if (spec.type == 'struct'):
+  print "#define %s_MAX_PACK_SIZE %d" % (spec.short_name.upper(),int(ceil(float(spec.max_bit_len)/8.0)))
+  print "#define %s_MIN_PACK_SIZE %d" % (spec.short_name.upper(), int(ceil(float(spec.min_bit_len)/8.0)))
+else:
+  max_size = 0
+  for field in spec.parsed_fields():
+    if field.bit_size > max_size:
+      max_size = field.bit_size
+  print "#define %s_MAX_PACK_SIZE %d" % (spec.short_name.upper(),int(ceil(float(max_size)/8.0)))
+
+print "#define %s_DT_SIG 0x%XULL" % (spec.short_name.upper(), spec.signature)
 if spec.id is not None:
-  print "#define %s_MSG_ID %s" % (spec.short_name.upper(), spec.id)
+  print "#define %s_DT_ID %s" % (spec.short_name.upper(), spec.id)
 }@
 @##############################
 @# Main struct of message
@@ -77,7 +88,6 @@ def print_field_def(field):
   type_prefix = ''
   if (sl_pos >= 0):
     type = type[sl_pos + 1:]
-    type_prefix = 'struct '
 
   if field.array_size > 0:
     array_size = "[%d]" % field.array_size
@@ -96,22 +106,82 @@ def print_field_def(field):
   print('\t%s%s%s %s%s;'%(type_prefix, type_canard, type_appendix, field.name, array_size))
 
 
-def print_encode_scalar(tabs, offset, field_len, field_name):
-  print('%scanardEncodeScalar(buffer, %s, %s, %s);'% (tabs, offset, field_len, field_name))
+def print_encode_scalar(tabs, offset, field_len, field_name, is_saturated):
+  if is_saturated:
+    sat_val = (1 << int(field_len)) - 1
+    print('%sif (%s > %d) {'%(tabs, field_name, sat_val))
+    print('%s\t%s = %d;'%(tabs, field_name, sat_val))
+    print('%s}'%tabs)
+  print('%scanardEncodeScalar(buffer, %s, %s, &%s);'% (tabs, offset, field_len, field_name))
 
-def print_encode_custom_types(tabs, field_len, field_type, field_name, tao_enable):
-  print('%s%s = encode_%s(%s_buf, &msg->%s, %s);'
+def print_encode_custom_types(tabs, offset, field_len, field_type, field_name, tao_enable):
+  print('%suint32_t %s = encode_%s(%s_buf, &msg->%s, %s);'
         %(tabs, field_len, field_type, field_name, field_name, tao_enable))
+  print('%sif (%s %% 8) {' % (tabs, field_len))
+  print('%s\t%s = (%s/8) + 1;'%(tabs, field_len, field_len))
+  print('%s} else {'%(tabs))
+  print('%s\t%s /= 8;'%(tabs, field_len))
+  print('%s}'%(tabs))
+  print('%smemmove(&buffer[%s], %s_buf, %s);'% (tabs, offset, field_name, field_len))
 
-def print_field_encode_decode(field, do_encode):
-  offset_append = ""
+def print_encode_scalar_array(tabs, offset, field_len, field_name, is_saturated):
+  if is_saturated:
+    sat_val = (1<< int(field_len)) - 1
+    print('%sif (%s[cnt] >= %d) {'%(tabs, field_name, sat_val))
+    print('%s\t%s[cnt] = %d;'%(tabs, field_name, sat_val))
+    print('%s}'%tabs)
+  print('%scanardEncodeScalar(buffer, %s, %s, &%s[cnt]);'% (tabs, offset, field_len, field_name))
+
+def print_encode_custom_types_array(tabs, offset, field_len, field_type, field_name, tao_enable):
+  print('%suint32_t %s = encode_%s(%s_buf, &msg->%s[cnt], %s);'
+        %(tabs, field_len, field_type, field_name, field_name, tao_enable))
+  print('%sif (%s %% 8) {'%(tabs, field_len))
+  print('%s\t%s = (%s/8) + 1;'%(tabs, field_len, field_len))
+  print('%s} else {'%(tabs))
+  print('%s\t%s /= 8;'%(tabs, field_len))
+  print('%s}'%(tabs))
+  print('%smemmove(&buffer[%s], %s_buf, %s);'% (tabs, offset, field_name, field_len))
+
+def print_decode_scalar(tabs, offset, field_len, is_signed, field_name):
+  print('%scanardDecodeScalar(transfer, %s, %s, %s, &%s);'% (tabs, offset, field_len, is_signed, field_name))
+
+def print_decode_custom_types(tabs, field_len, offset, field_type, field_name, tao_enable):
+  print('%suint32_t %s = decode_%s(transfer, %s, &msg->%s, %s);'
+        %(tabs, field_len, field_type, offset, field_name, tao_enable))
+def print_decode_scalar_array(tabs, offset, field_len, is_signed, field_name):
+  print('%scanardDecodeScalar(transfer, %s, %s, %s, &s%s[cnt]);'% (tabs, offset, field_len, is_signed, field_name))
+
+def print_decode_custom_types_array(tabs, field_len, offset, field_type, field_name, tao_enable):
+  print('%suint32_t %s = decode_%s(transfer, %s, &msg->%s[cnt], %s);'
+        %(tabs, field_len, field_type, offset, field_name, tao_enable))
+
+def print_field_encode_decode_union(field, do_encode):
+  max_size = 0
+  for field in spec.parsed_fields():
+    if field.bit_size > max_size:
+      max_size = field.bit_size
+  if do_encode:
+    print('\tmemmove(buffer, msg, %s_MAX_PACK_SIZE);' % (spec.full_name.replace('/','_').upper()))
+    print('\treturn %d;' % max_size)
+  else:
+    print('\treturn descatterTransferPayload(transfer, bit_offset, %s_MAX_PACK_SIZE, msg);'
+      %(spec.full_name.replace('/','_').upper()))
+
+def print_field_encode_decode_struct(field, do_encode):
+  if do_encode:
+    offset_append = ""
+  else:
+    offset_append = "bit_offset + "
   offset = 0
   for field in spec.parsed_fields():
     if (not field.is_header):
       if field.type == 'void':
         offset += field.bit_size
         continue
-      print('\n\t//Packing %s %s' % (field.type, field.name))
+      if do_encode:
+        print('\n\t//Packing %s %s' % (field.type, field.name))
+      else:
+        print('\n\t//Unpacking %s %s' % (field.type, field.name))
       if field.array_size == 0:
         if spec.parsed_fields()[-1].darray_flag and\
            spec.parsed_fields()[-1].tao_flag == 1 and\
@@ -119,100 +189,159 @@ def print_field_encode_decode(field, do_encode):
           #this might be length of tail array
           print('\t%s_t tail_array_offset = 0;' % field.type)
           print('\tif(!tao_mode) {')
-          print_encode_scalar('\t\t', offset_append+str(offset), str(field.bit_size), field.name)
+          if do_encode:
+            print_encode_scalar('\t\t', offset_append+str(offset), str(field.bit_size), 'msg->'+field.name, True)
+          else:
+            print_decode_scalar('\t\t', offset_append+str(offset), str(field.bit_size), field.is_signed, 'msg->'+field.name)
+
           print('\t\ttail_array_offset = %d;' % field.bit_size)
           print('\t}')
           offset_append += "tail_array_offset + "
         elif field.type.find('/') > 0:
           #handle custom type
           field_type_name = field.type.split('/')[1]
-          field_len = field.name + '_len'
-          print('\tuint8_t %s_buf[UAVCAN_%s_MAX_PACK_SIZE];' 
-            % (field.name, field.type.replace('/','_').upper()))
-          print_encode_custom_types('\t', 'uint32 ' + field_len, field.type.replace('/','_'), field.name, 'false')
-          print_encode_scalar('\t', offset_append+str(offset), field_len, field.name+'_buf')
+          field_len = field.name + '_bitlen'
+          if do_encode:
+            print('\tuint8_t %s_buf[%s_MAX_PACK_SIZE];' 
+              % (field.name, field.type.replace('/','_').upper()))
+          
+            print_encode_custom_types('\t', offset_append+str(offset), field_len, field.type.replace('/','_'), field.name, 'false')
+            #do memmove
+            #print_encode_scalar('\t', offset_append+str(offset), field_len, '&%s_buf'%field.name, field.is_saturated)
+          else:
+            print_decode_custom_types('\t', field_len, offset_append+str(offset), field.type.replace('/','_'), field.name, 'false')
           offset_append += field_len + " + "
         else:
-          print('\tcanardEncodeScalar(buffer, %s%d, %d, &msg->%s);'
-                %(offset_append, offset, field.bit_size, field.name))
+          if do_encode:
+            print_encode_scalar('\t', offset_append+str(offset), str(field.bit_size), "msg->"+field.name, field.is_saturated)
+          else:
+            print_decode_scalar('\t', offset_append+str(offset), str(field.bit_size), field.is_signed, "msg->"+field.name)
           offset += field.bit_size
       elif not field.darray_flag:
         if field.type.find('/') > 0:
           #handle custom type static arrays
           field_type_name = field.type.split('/')[1]
-          field_len = field.name + '_len'
-          field_ulen = field.name + '_ulen'
-          print('\tuint8_t %s_buf[UAVCAN_%s_MAX_PACK_SIZE];' 
-              % (field.name, field.type.split('/')[1].upper()))
+          field_len = field.name + '_bitlen'
+          field_ulen = field.name + '_ubitlen'
+          print('\tuint8_t %s_buf[%s_MAX_PACK_SIZE];' 
+              % (field.name, field.type.replace('/','_').upper()))
           print('\tuint32_t %s = 0;'% field_len)
           print('\tuint32_t %s;'% field_ulen)
           offset_append += field_len + " + "
           print('\tfor (uint16_t cnt = 0; cnt < %d; cnt++) {' % field.array_size)
-          print_encode_custom_types('\t\t', field_ulen, field_type_name.replace('/','_')+'[cnt]', field.name, 'false')
-          print_encode_scalar('\t\t', offset_append+str(offset), field_ulen, field.name+'_buf')
-          print('\t\t%s += %s;' % (field_len,field_ulen))
+          if do_encode:
+            print_encode_custom_types_array('\t\t', offset_append+str(offset), field_ulen, field_type_name.replace('/','_'), field.name, 'false')
+            #do memmove
+            #print_encode_scalar('\t\t', offset_append+str(offset), field_ulen, field.name+'_buf')
+            print('\t\t%s += %s;' % (field_len,field_ulen))
+          else:
+            print_decode_custom_types_array('\t\t', field_ulen, offset_append+str(offset), field_type_name.replace('/','_'), field.name, 'false')    
+            print('\t\t%s += %s;' % (field_len,field_ulen))
           print('\t}')
         else:  
           print('\tfor (uint16_t cnt = 0; cnt < %d; cnt++) {' % field.array_size)
-          print_encode_scalar('\t\t',offset_append+'cnt*'+str(field.bit_size)+' + ' +str(offset),\
-                              str(field.bit_size), '&msg->'+field.name)
+          if do_encode:
+            print_encode_scalar_array('\t\t',offset_append+'cnt*'+str(field.bit_size)+' + ' +str(offset),\
+                              str(field.bit_size), 'msg->'+field.name, field.is_saturated)
+          else:
+            print_decode_scalar_array('\t\t',offset_append+'cnt*'+str(field.bit_size)+' + ' +str(offset),\
+                              str(field.bit_size), field.is_signed, 'msg->'+field.name)
           print('\t}')
           offset += field.bit_size*field.array_size
       else:
         if field.type.find('/') > 0 and field.tao_flag != 3:
           #handle custom type static arrays
           field_type_name = field.type.replace('/','_')
-          field_len = field.name + '_len'
-          field_ulen = field.name + '_ulen'
-          print('\tuint8_t %s_buf[UAVCAN_%s_MAX_PACK_SIZE];' 
-              % (field.name, field.type.split('/')[1].upper()))
+          field_len = field.name + '_bitlen'
+          field_ulen = field.name + '_ubitlen'
+          if do_encode:
+            print('\tuint8_t %s_buf[%s_MAX_PACK_SIZE];' 
+                % (field.name, field.type.replace('/','_').upper()))
+
           print('\tuint32_t %s = 0;'% field_len)
           print('\tuint32_t %s;'% field_ulen)
           offset_append += field_len + " + "
-          print('\tassert(msg->%s_len <= %d);' % (field.name, field.array_size))
+          if do_encode or field.tao_flag != 1:
+            print('\tassert(msg->%s_len <= %d);' % (field.name, field.array_size))
+          else:
+            print('\tif(tao_mode) {')
+            print('\t\tmsg->%s_len = %d;'%(field.name,field.array_size))
+            print('\t} else {')
+            print('\t\tassert(msg->%s_len <= %d);' % (field.name, field.array_size))
+            print('\t}')
           print('\tfor (uint16_t cnt = 0; cnt < msg->%s_len; cnt++) {' % field.name)
-          print_encode_custom_types('\t\t', field_ulen, field_type_name.replace('/','_')+'[cnt]', field.name, 'false')
-          print_encode_scalar('\t\t' ,offset_append+str(offset), field_ulen, field.name+'_buf')
-          print('\t\t%s += %s;' % (field_len,field_ulen))
+          if do_encode:
+            print_encode_custom_types_array('\t\t', offset_append+str(offset), field_ulen, field_type_name.replace('/','_'), field.name, 'false')
+            #do memmove
+            #print_encode_scalar('\t\t' ,offset_append+str(offset), field_ulen, field.name+'_buf')
+            print('\t\t%s += %s;' % (field_len,field_ulen))
+          else:
+            print_decode_custom_types_array('\t\t', field_ulen, offset_append+str(offset), field_type_name.replace('/','_'), field.name, 'false')
+            print('\t\t%s += %s;' % (field_len,field_ulen))
+            if field.tao_flag:
+              print('\t\tif(tao_mode && ((transfer->payload_len*8 - (%s%d)) < %s_MIN_PACK_SIZE)) {' % (offset_append, offset, field_type_name.replace('/','_').upper()))
+              print('\t\t\tmsg->%s_len = cnt;' % field.name)
+              print('\t\t\tbreak;')
+              print('\t\t}')
           print('\t}')
         elif field.tao_flag == 3:
           field_type_name = field.type.replace('/','_')
-          field_len = field.name + '_len'
-          field_ulen = field.name + '_ulen'
-          print('\tuint8_t %s_buf[UAVCAN_%s_MAX_PACK_SIZE];' 
-              % (field.name, field.type.split('/')[1].upper()))
+          field_len = field.name + '_bitlen'
+          field_ulen = field.name + '_ubitlen'
+          print('\tuint8_t %s_buf[%s_MAX_PACK_SIZE];' 
+              % (field.name, field.type.replace('/','_').upper()))
           print('\tuint32_t %s = 0;'% field_len)
           print('\tuint32_t %s;'% field_ulen)
           offset_append += field_len + " + "
           print('\tassert(msg->%s_len <= %d);' % (field.name, field.array_size))
-          print('uint16_t cnt;')
+          print('\tuint16_t cnt;')
           print('\tfor (cnt = 0; cnt < msg->%s_len - 1; cnt++) {' % field.name)
-          print_encode_custom_types('\t\t', field_ulen, field_type_name.replace('/','_')+'[cnt]', field.name, 'false')
-          print_encode_scalar('\t\t', offset_append+str(offset), field_ulen, field.name+'_buf')
+          if do_encode:
+            print_encode_custom_types_array('\t\t', offset_append+str(offset), field_ulen, field_type_name.replace('/','_'), field.name, 'false')
+            #do memmove
+            #print_encode_scalar('\t\t', offset_append+str(offset), field_ulen, field.name+'_buf')
+          else:
+            print_decode_custom_types_array('\t\t', field_ulen, offset_append+str(offset), field_type_name.replace('/','_'), field.name, 'false')
+            
           print('\t\t%s += %s;' % (field_len,field_ulen))
           print('\t}')
+          if do_encode:
+            print_encode_custom_types_array('\t\t', offset_append+str(offset), field_ulen, field_type_name.replace('/','_'), field.name, 'false')
+            #do memmove
+            #print_encode_scalar(offset_append, offset+str(field_ulen),
+            #                  '%s_buf[msg->%s_len - 1]'%(field.name, field.name))
+          else:
+            print_decode_custom_types_array('\t\t', field_ulen, offset_append+str(offset), field_type_name.replace('/','_'), field.name, 'false')
 
-          print_encode_custom_types('\t\t', field_ulen, field_type_name.replace('/','_')+'[cnt]', field.name, 'false')
-          print_encode_scalar(offset_append, offset+str(field_ulen),
-                              '%s_buf[msg->%s_len - 1]'%(field.name, field.name))
           print('\t%s += %s;' % (field_len,field_ulen))
 
         else:
+          if field.tao_flag == 1 and not do_encode:
+            print('\tif (tao_mode) {')
+            print('\t\tmsg->%s_len = (transfer->payload_len*8 - (%s%d))/%d;' % (field.name, offset_append, offset, field.bit_size))
+            print('\t}')
           print('\tassert(msg->%s_len <= %d);' % (field.name, field.array_size))
           print('\tfor (uint16_t cnt = 0; cnt < msg->%s_len; cnt++) {' % field.name)
-          print_encode_scalar('\t\t', offset_append+'cnt*'+str(field.bit_size)+' + ' + str(offset),str(field.bit_size),
-                              '&msg->%s[cnt]'%field.name)
+          if do_encode:
+            print_encode_scalar_array('\t\t', offset_append+'cnt*'+str(field.bit_size)+' + ' + str(offset), str(field.bit_size),
+                              '&msg->%s'%field.name, field.is_saturated)
+          else:
+            print_decode_scalar_array('\t\t', offset_append+'cnt*'+str(field.bit_size)+' + ' + str(offset), str(field.bit_size),
+                              field.is_signed, '&msg->%s'%field.name)
           print('\t}')
           offset_append += "msg->%s_len*%d + " % (field.name, field.bit_size)
+  #we remove the bit offset in the return if there
+  offset_append = offset_append.replace("bit_offset + ", "")
   print('\n\treturn %s%d;' % (offset_append, offset))
 }
 
+typedef @(spec.type) @(canard_name) @(canard_name);
 #ifdef __cplusplus
-@#class @(canard_struct) {
-struct __EXPORT @(canard_struct) {
+@#class @(canard_name) {
+@(spec.type) __EXPORT @(canard_name) {
 @#public:
 #else
-struct @(canard_struct) {
+@(spec.type) @(canard_name) {
 #endif
 @{
 # loop over all fields and print the type and name
@@ -223,10 +352,25 @@ for field in spec.parsed_fields():
 };
 
 
-uint32_t encode_@(canard_struct)(uint8_t buffer[], @(canard_struct) *msg, bool& tao_mode)
+uint32_t encode_@(canard_name)(uint8_t buffer[], @(canard_name) *msg, bool tao_mode)
 {
 @{
-print "\tmemset(buffer, 0, UAVCAN_%s_MAX_PACK_SIZE);" % spec.short_name.upper()
-print_field_encode_decode(spec.parsed_fields(), True)
+print "\t(void)tao_mode; //in case we don\'t use it"
+print "\tmemset(buffer, 0, %s_MAX_PACK_SIZE);" % spec.short_name.upper()
+if spec.type == "struct":
+  print_field_encode_decode_struct(spec.parsed_fields(), True)
+else:
+  print_field_encode_decode_union(spec.parsed_fields(), True)  
+}@
+}
+
+uint32_t decode_@(canard_name)(const CanardRxTransfer* transfer, uint32_t bit_offset, @(canard_name) *msg, bool tao_mode)
+{
+@{
+print "\t(void)tao_mode; //in case we don\'t use it"
+if spec.type == "struct":
+  print_field_encode_decode_struct(spec.parsed_fields(), False)
+else:
+  print_field_encode_decode_union(spec.parsed_fields(), False)  
 }@
 }

@@ -1,0 +1,40 @@
+@###############################################
+@#
+@# Canard message source code
+@# generation for C++
+@#
+@# EmPy template for generating <msg>.h files
+@# Based on the original template for ROS
+@#
+@###############################################
+@# Start of Template
+@#
+@# Context:
+@#  - file_name_in (String) Source file
+@#  - spec (msggen.MsgSpec) Parsed specification of the .msg file
+@#  - md5sum (String) MD5Sum of the .msg specification
+@###############################################
+
+/* Auto-generated from file @file_name_in */
+
+@{
+import genmsg.msgs
+from math import ceil
+canard_struct = '%s'%spec.short_name
+topic_name = spec.short_name
+offset = 0
+}@
+
+#pragma once
+
+@##############################
+@# Generic Includes
+@##############################
+#include <stdint.h>
+#include <float16.h>
+@{
+if spec.request is not None:
+	print "#include <%sRequest.h>"%spec.full_name
+if spec.response is not None:
+	print "#include <%sResponse.h>"%spec.full_name
+}@

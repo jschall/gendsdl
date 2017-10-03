@@ -208,16 +208,25 @@ class Field(object):
     - ``is_header``
     """
     
-    def __init__(self, name, type, bit_size, array_size, tao_flag, darray_flag):
+    def __init__(self, name, type, bit_size, array_size, tao_flag, darray_flag, is_signed, is_saturated):
         self.name = name
         self.type = type
         self.bit_size = bit_size
         self.array_size = array_size
         self.tao_flag = tao_flag
         self.darray_flag = darray_flag
+        self.is_signed = is_signed
+        self.is_saturated = is_saturated
         (self.base_type, self.is_array, self.array_len) = parse_type(type)
         self.is_header = is_header_type(self.type)
         self.is_builtin = is_builtin(self.base_type)
+
+    def get_normalised_definition(self):
+        """
+        Returns normalized DSDL definition text.
+        Please refer to the specification for details about normalized DSDL definitions.
+        """
+        txt = StringIO()
 
     def __eq__(self, other):
         if not isinstance(other, Field):
@@ -236,9 +245,9 @@ class MsgSpec(object):
     correspondence. MsgSpec can also return an md5 of the source text.
     """
 
-    def __init__(self, types, names, constants, text, full_name, max_bit_len, min_bit_len,
-        bit_sizes=[], array_sizes=[], tao_flags=[], darray_flags=[],
-        package = '', short_name = '', id = None):
+    def __init__(self, normalized_def, types, names, constants, text, full_name, max_bit_len, min_bit_len,
+        bit_sizes=[], array_sizes=[], tao_flags=[], darray_flags=[], is_signed_flags=[], is_saturated_flags=[],
+        package = '', short_name = '', id = None, type="struct"):
         """
         :param types: list of field types, in order of declaration, ``[str]``
         :param names: list of field names, in order of declaration, ``[str]``
@@ -271,17 +280,22 @@ class MsgSpec(object):
         self.array_sizes = array_sizes
         self.tao_flags = tao_flags
         self.darray_flags = darray_flags
+        self.is_signed_flags = is_signed_flags
+        self.is_saturated_flags = is_saturated_flags
         self.max_bit_len = max_bit_len
         self.min_bit_len = min_bit_len
         self.id = id
+        self.signature = 0
+        self.normalized_def = normalized_def
+        self.type = type
         try:
             self._parsed_fields = []
-            for (name, type, bit_size, array_size, tao_flag, darray_flag) in\
+            for (name, type, bit_size, array_size, tao_flag, darray_flag, is_signed, is_saturated) in\
             zip(self.names, self.types,\
-                self.bit_sizes, self.array_sizes, self.tao_flags, self.darray_flags):
+                self.bit_sizes, self.array_sizes, self.tao_flags, self.darray_flags, self.is_signed_flags, self.is_saturated_flags):
 
                 self._parsed_fields.append(Field(name, type, bit_size,\
-                                                array_size, tao_flag, darray_flag))
+                                                array_size, tao_flag, darray_flag, is_signed, is_saturated))
         except ValueError as e:
             raise InvalidMsgSpec("invalid field: %s"%(e))
         
@@ -297,6 +311,9 @@ class MsgSpec(object):
         """
         return self._parsed_fields
 
+    def update_signature(self, signature):
+        self.signature = signature
+
     #accumulate bit lengths for custom types
     def update_bit_length(self, min_bit_len, max_bit_len, field_type):
         for field in self._parsed_fields:   
@@ -305,13 +322,13 @@ class MsgSpec(object):
                     self.max_bit_len += field.array_size*max_bit_len
                     if not field.darray_flag:
                         self.min_bit_len += field.array_size*min_bit_len
+                    if (min_bit_len < 8 and field.tao_flag == 1):
+                        #this is a case where we should enable TAO 
+                        #for the last element in the list
+                        field.tao_flag = 3
                 else:
                     self.max_bit_len += max_bit_len
                     self.min_bit_len += min_bit_len
-            if (min_bit_len < 8 and field.tao_flag == 1):
-                #this is a case where we should enable TAO 
-                #for the last element in the list
-                field.tao_flag = 3
 
     def has_header(self):
         """
