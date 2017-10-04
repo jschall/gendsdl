@@ -217,16 +217,7 @@ class Field(object):
         self.darray_flag = darray_flag
         self.is_signed = is_signed
         self.is_saturated = is_saturated
-        (self.base_type, self.is_array, self.array_len) = parse_type(type)
         self.is_header = is_header_type(self.type)
-        self.is_builtin = is_builtin(self.base_type)
-
-    def get_normalised_definition(self):
-        """
-        Returns normalized DSDL definition text.
-        Please refer to the specification for details about normalized DSDL definitions.
-        """
-        txt = StringIO()
 
     def __eq__(self, other):
         if not isinstance(other, Field):
@@ -236,7 +227,7 @@ class Field(object):
                    self.type == other.type
     
     def __repr__(self):
-        return "[%s, %s, %s, %s, %s]"%(self.name, self.type, self.base_type, self.is_array, self.array_len)
+        return "[%s, %s, %s]"%(self.name, self.type, self.array_len)
 
 class MsgSpec(object):
     """
@@ -245,7 +236,7 @@ class MsgSpec(object):
     correspondence. MsgSpec can also return an md5 of the source text.
     """
 
-    def __init__(self, normalized_def, types, names, constants, text, full_name, max_bit_len, min_bit_len,
+    def __init__(self, types, names, constants, depends, text, full_name, max_bit_len, min_bit_len,
         bit_sizes=[], array_sizes=[], tao_flags=[], darray_flags=[], is_signed_flags=[], is_saturated_flags=[],
         package = '', short_name = '', id = None, type="struct"):
         """
@@ -262,16 +253,11 @@ class MsgSpec(object):
             short_name = alt_short_name
             
         self.types = types
-        if len(set(names)) != len(names):
-            raise InvalidMsgSpec("Duplicate field names in message: %s"%names)
+
         self.names = names
         self.constants = constants
         assert len(self.types) == len(self.names), "len(%s) != len(%s)"%(self.types, self.names)
-        #Header.msg support
-        if (len(self.types)):
-            self.header_present = self.types[0] == HEADER_FULL_NAME and self.names[0] == 'header'
-        else:
-            self.header_present = False
+
         self.text = text
         self.full_name = full_name
         self.short_name = short_name
@@ -286,14 +272,13 @@ class MsgSpec(object):
         self.min_bit_len = min_bit_len
         self.id = id
         self.signature = 0
-        self.normalized_def = normalized_def
         self.type = type
+        self.depends = depends
         try:
             self._parsed_fields = []
             for (name, type, bit_size, array_size, tao_flag, darray_flag, is_signed, is_saturated) in\
             zip(self.names, self.types,\
                 self.bit_sizes, self.array_sizes, self.tao_flags, self.darray_flags, self.is_signed_flags, self.is_saturated_flags):
-
                 self._parsed_fields.append(Field(name, type, bit_size,\
                                                 array_size, tao_flag, darray_flag, is_signed, is_saturated))
         except ValueError as e:

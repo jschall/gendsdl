@@ -55,7 +55,7 @@ from . msgs import MsgSpec, TIME, TIME_MSG, DURATION, DURATION_MSG, HEADER, HEAD
      Field, Constant, resolve_type
 from . names import normalize_package_context, package_resource_name, package_id_name
 from . srvs import SrvSpec
-from . signature import Signature, compute_signature, bytes_from_crc64
+import uavcan.dsdl.parser as uavcan
 class MsgNotFound(Exception):
 
     def __init__(self, message, base_type=None, package=None, search_path=None):
@@ -122,7 +122,7 @@ def load_msg_by_type(msg_context, msg_type, search_path):
     :returns: :class:`MsgSpec` instance, ``(str, MsgSpec)``
     :raises: :exc:`MsgNotFound` If message cannot be located.
     """
-    log("load_msg_by_type(%s, %s)" % (msg_type, str(search_path)))
+    print("load_msg_by_type(%s, %s)" % (msg_type, str(search_path)))
     if not isinstance(search_path, dict):
         raise ValueError("search_path must be a dictionary of {namespace: dirpath}")
     if msg_type == HEADER:
@@ -131,8 +131,153 @@ def load_msg_by_type(msg_context, msg_type, search_path):
     file_path = get_msg_file(package_name, base_type, search_path)
     log("file_path", file_path)
 
-    spec = load_msg_from_file(msg_context, file_path, msg_type)
+    parser = Parser(search_path)
+    t = parser.parse('/')
     msg_context.set_file(msg_type, file_path)
+    return spec
+
+def parse_primitive_type(clean_line):
+    field_type = clean_line.split(' ')[0]
+    if field_type.find('truncated') >= 0:
+        field_type = clean_line.split(' ')[1]
+        clean_line = ' '.join(clean_line.split(' ')[1:])
+    elif field_type.find('saturated') >= 0:
+        field_type = clean_line.split(' ')[1]
+        clean_line = ' '.join(clean_line.split(' ')[1:])
+
+    if field_type.find('int') >= 0:
+        if clean_line.find('uint') == 0:    
+            bit_len = clean_line[4:]
+            field_type = 'uint'
+        else:
+            bit_len = clean_line[3:]
+            field_type = 'int'
+        bit_len_num = int(bit_len)
+        if bit_len_num <= 8:
+            return field_type + "8"
+        elif bit_len_num <= 16:
+            return field_type + "16"
+        elif bit_len_num <= 32:
+            return field_type + "32"
+        elif bit_len_num <= 64:
+            return field_type + "64"
+    elif field_type.find('float') >= 0 :
+        return field_type
+    elif field_type.find('bool') >= 0:
+        return 'bool'
+    elif field_type.find('void') >= 0:
+        return 'void'
+    else:
+        raise InvalidMsgSpec("Unsupported PrimitiveType [%s]"%clean_line)
+ 
+def load_msg_from_parsed_fields(msg_context, parsed_type, parsed_fields, parsed_constants, max_bit_len, min_bit_len, is_union, is_srv = 0):
+
+    if len(parsed_fields) == 0:
+        return None
+    full_name = parsed_type.full_name.replace('.', '/')
+    if is_srv == 1:
+        full_name += 'Request'
+    elif is_srv == 2:
+        full_name += 'Response'
+    package_name,_ = package_resource_name(full_name)
+    short_name = full_name.replace('/','_')
+    types = []
+    names = []
+    constants = []
+    bit_sizes = []
+    array_sizes = []
+    tao_flags = []
+    darray_flags = []
+    is_signed_flags = []
+    is_saturated_flags = []
+    depends = []
+    for constant in parsed_constants:
+        constants.append(Constant(constant.type, constant.name, constant.value, constant.string_value)) 
+    
+    for field in parsed_fields:
+        if field.type.category == uavcan.Type.CATEGORY_PRIMITIVE:
+            bit_sizes.append(field.type.bitlen)
+            is_saturated_flags.append(True if field.type.cast_mode == uavcan.PrimitiveType.CAST_MODE_SATURATED else False)        
+            if field.type.kind  in (uavcan.PrimitiveType.KIND_SIGNED_INT, uavcan.PrimitiveType.KIND_FLOAT):
+                is_signed_flags.append('true')
+            else:
+                is_signed_flags.append('false')
+        elif field.type.category == uavcan.Type.CATEGORY_VOID:
+            bit_sizes.append(field.type.bitlen)
+            is_saturated_flags.append(False)        
+            is_signed_flags.append('false')
+        elif field.type.category == uavcan.Type.CATEGORY_ARRAY and field.type.value_type.category == uavcan.Type.CATEGORY_PRIMITIVE:
+            bit_sizes.append(field.type.value_type.bitlen)
+            is_saturated_flags.append(True if field.type.value_type.cast_mode == uavcan.PrimitiveType.CAST_MODE_SATURATED else False)        
+            if field.type.value_type.kind in (uavcan.PrimitiveType.KIND_SIGNED_INT, uavcan.PrimitiveType.KIND_FLOAT):
+                is_signed_flags.append('true')
+            else:
+                is_signed_flags.append('false')
+        else:
+            bit_sizes.append(0) # Not relevant
+            is_saturated_flags.append(False)
+            is_signed_flags.append('false')
+
+        if field.type.category == uavcan.Type.CATEGORY_ARRAY:
+            array_sizes.append(field.type.max_size)
+            darray_flags.append(True if field.type.mode == uavcan.ArrayType.MODE_DYNAMIC else False)
+        else:
+            array_sizes.append(0)
+            darray_flags.append(False)
+
+        if field.type.category == uavcan.Type.CATEGORY_COMPOUND:
+            conv_type = field.type.full_name.replace('.','/')
+            depends.append(conv_type)
+        elif field.type.category in (uavcan.Type.CATEGORY_PRIMITIVE, uavcan.Type.CATEGORY_VOID):
+            conv_type = parse_primitive_type(field.type.full_name)
+        elif field.type.category == uavcan.Type.CATEGORY_ARRAY:
+            if field.type.value_type.category == uavcan.Type.CATEGORY_PRIMITIVE:
+                conv_type = parse_primitive_type(field.type.value_type.full_name)
+            else:
+                conv_type = field.type.value_type.full_name.replace('.','/')
+                depends.append(conv_type)
+        else:
+            raise InvalidMsgSpec("bad field type category [%d]"%field.type.category)
+        types.append(conv_type)
+        names.append(field.name)
+        tao_flags.append(0)
+    if is_union == True:
+        type = "union"
+    else:
+        type = "struct"
+
+    if darray_flags[-1]:
+        if bit_sizes[-1] >= 8:
+            tao_flags[-1] = 1
+        elif parsed_fields[-1].type.value_type == uavcan.Type.CATEGORY_COMPOUND:
+            if parsed_fields[-1].type.value_type.get_min_bitlen() >= 8:
+                tao_flags[-1] = 1
+            else:
+                tao_flags[-1] = 3
+    spec = MsgSpec(types, names, constants, depends, parsed_type.source_text, full_name, max_bit_len, min_bit_len,
+                   bit_sizes, array_sizes, tao_flags, darray_flags, is_signed_flags, is_saturated_flags, 
+                   package_name, short_name, parsed_type.default_dtid, type)
+    spec.update_signature(parsed_type.get_dsdl_signature())
+    msg_context.register(full_name, spec)
+    return spec
+
+def load_msg_from_parsed_type(msg_context, parsed_type, search_path):
+    return load_msg_from_parsed_fields(msg_context, parsed_type, 
+                                       parsed_type.fields, parsed_type.constants, 
+                                       parsed_type.get_max_bitlen(), parsed_type.get_min_bitlen(),
+                                       parsed_type.union)
+
+def load_srv_from_parsed_type(msg_context, parsed_type, search_path):
+    full_name = parsed_type.full_name.replace('.', '/')
+    msg_in = load_msg_from_parsed_fields(msg_context, parsed_type, 
+                                        parsed_type.request_fields,parsed_type.request_constants,
+                                        parsed_type.get_max_bitlen_request(), parsed_type.get_min_bitlen_request(),
+                                        parsed_type.request_union, 1)
+    msg_out = load_msg_from_parsed_fields(msg_context, parsed_type, 
+                                        parsed_type.response_fields, parsed_type.response_constants,
+                                        parsed_type.get_max_bitlen_response(), parsed_type.get_min_bitlen_response(),
+                                        parsed_type.response_union, 2)
+    spec = SrvSpec(msg_in, msg_out, parsed_type.source_text, full_name)
     return spec
 
 def load_srv_by_type(msg_context, srv_type, search_path):
@@ -276,68 +421,7 @@ def proc_array(clean_line):
             clean_line = clean_line[:clean_line.find('[')] + clean_line[clean_line.find(']')+1:]
     return (normalized_line, clean_line, array_size, is_dynamic_array)
 
-def proc_scalar(normalized_line, clean_line, is_constant_type):
-    bit_len_str = ""
-    bit_len_num = 0
-    field_val = ''
-    is_signed = ''
-    is_saturated = False
-    field_type = clean_line.split(' ')[0]
-    if field_type.find('truncated') >= 0:
-        saturated_cast_type = False
-        field_type = clean_line.split(' ')[1]
-        clean_line = ' '.join(clean_line.split(' ')[1:])
-    elif field_type.find('saturated') >= 0:
-        saturated_cast_type = True
-        field_type = clean_line.split(' ')[1]
-        clean_line = ' '.join(clean_line.split(' ')[1:])
-        is_saturated = True
-    elif field_type.find('int') >= 0 or field_type.find('float') >= 0 or field_type.find('bool') >= 0:
-        normalized_line = 'saturated ' + normalized_line
-        is_saturated = True
-    if field_type.find('int') >= 0:
-        if clean_line.find('uint') == 0:
-            if is_constant_type:
-                bit_len, field, equals, field_val = [s for s in [x.strip() for x in clean_line[4:].split(" ")] if s]
-                field_val = ' = ' + field_val
-            else:
-                bit_len, field = [s for s in [x.strip() for x in clean_line[4:].split(" ")] if s]
-            field_type = 'uint'
-            is_signed = 'false'
-        else:
-            if is_constant_type:
-                bit_len, field, equals, field_val = [s for s in [x.strip() for x in clean_line[3:].split(" ")] if s]
-                field_val = ' = ' + field_val
-            else:
-                bit_len, field = [s for s in [x.strip() for x in clean_line[3:].split(" ")] if s]
-            field_type = 'int'
-            is_signed = 'true'
-        bit_len_num = int(bit_len)
-        if bit_len_num != 8 and bit_len_num != 16 and bit_len_num != 32 and bit_len_num != 64:
-            if bit_len_num < 8:
-                clean_line = field_type + "8 " + field + field_val
-                #bit_len_str = "uint8 %s_%s_BITLEN = %s" % (short_name.upper(),field.upper(), bit_len_num)
-            elif bit_len_num < 16:
-                clean_line = field_type + "16 " + field + field_val
-                #bit_len_str = "uint8 %s_%s_BITLEN = %s" % (short_name.upper(),field.upper(), bit_len_num)
-            elif bit_len_num < 32:
-                clean_line = field_type + "32 " + field + field_val
-                #bit_len_str = "uint8 %s_%s_BITLEN = %s" % (short_name.upper(),field.upper(), bit_len_num)
-            elif bit_len_num < 64:
-                clean_line = field_type + "64 " + field + field_val
-                #bit_len_str = "uint8 %s_%s_BITLEN = %s" % (short_name.upper(),field.upper(), bit_len_num)
-    elif field_type.find('float') >= 0 :
-        if not is_constant_type:
-            bit_len, field = [s for s in [x.strip() for x in clean_line[5:].split(" ")] if s]
-            bit_len_num = int(bit_len)
-            is_signed = 'true'
-    elif field_type.find('bool') >= 0:
-            bit_len_num = 1
-            is_signed = 'false'
-
-    return (normalized_line, clean_line, bit_len_str, bit_len_num, is_signed, is_saturated)
-
-def load_msg_from_string(msg_context, text, full_name):
+def load_msg_from_string(msg_context, text, full_name, is_server = 0):
     """
     Load message specification from a string.
 
@@ -367,9 +451,11 @@ def load_msg_from_string(msg_context, text, full_name):
     max_bit_len = 0
     min_bit_len = 0
     reserved_cnt = 0
-    normalized_def = StringIO()
     type = "struct"
-    normalized_def.write(full_name.replace('/','.') + '\n')
+    if is_server == 0:
+        msg_context.normalized_def.write(full_name.replace('/','.') + '\n')
+    elif is_server == 2:
+        msg_context.normalized_def.write('---\n')
     for orig_line in text.split('\n'):
         clean_line = _strip_comments(orig_line)
         is_signed = ''
@@ -380,7 +466,7 @@ def load_msg_from_string(msg_context, text, full_name):
         else:
             if clean_line.find('union') >= 0:
                 type = "union"
-                normalized_def.write('@union\n')
+                msg_context.normalized_def.write('@union\n')
                 continue
             if clean_line.find('void') >= 0:
                 void_len = int(clean_line[4:])
@@ -410,7 +496,7 @@ def load_msg_from_string(msg_context, text, full_name):
                     normalized_line = field_type.replace('/','.') + "[%d] "%array_size + name
                 else:
                     normalized_line = field_type.replace('/','.') + " " + name
-            normalized_def.write(normalized_line + '\n')
+            msg_context.normalized_def.write(normalized_line + '\n')
 
             if is_dynamic_array:
                 da_clean_line = "uint%d %s_len" % (ceil(numpy.log2(int(array_size)+1)), name)
@@ -451,7 +537,7 @@ def load_msg_from_string(msg_context, text, full_name):
         #2. The array is the last field in the top-level data structure.
         if is_dynamic_array and ((field_type.find('/') > 0) or (bit_sizes[-1] >= 8)):
             tao_flags[-1] = 1
-        spec = MsgSpec(normalized_def, types, names, constants, text, full_name, max_bit_len, min_bit_len,
+        spec = MsgSpec(types, names, constants, text, full_name, max_bit_len, min_bit_len,
                        bit_sizes, array_sizes, tao_flags, darray_flags, is_signed_flags, is_saturated_flags, 
                        package_name, short_name, id, type)
         msg_context.register(full_name, spec)
@@ -469,11 +555,13 @@ def load_msg_from_file(msg_context, file_path, full_name):
     :returns: :class:`MsgSpec` instance
     :raises: :exc:`InvalidMsgSpec`: if syntax errors or other problems are detected in file
     """
-    log("Load spec from", file_path)
+    print("Load spec from", file_path)
     with open(file_path, 'r') as f:
         text = f.read()
     try:
-        return load_msg_from_string(msg_context, text, full_name)
+        parser = Parser(search_path)
+        t = parser.parse('/')
+        return None
     except InvalidMsgSpec as e:
         raise InvalidMsgSpec('%s: %s'%(file_path, e))
 
@@ -493,8 +581,6 @@ def load_msg_depends(msg_context, spec, search_path):
         return []
     package_context = spec.package
     print("load_msg_depends <spec>", spec.full_name, package_context)
-    sig = Signature(compute_signature(spec.normalized_def.getvalue().strip().replace('\n\n\n', '\n').replace('\n\n', '\n')))
-
     depends = []
     # Iterate over each field, loading as necessary
     for unresolved_type in spec.types:
@@ -506,18 +592,15 @@ def load_msg_depends(msg_context, spec, search_path):
         # Retrieve the MsgSpec instance of the field
         if msg_context.is_registered(resolved_type):
             depspec = msg_context.get_registered(resolved_type)
-            sig_value = sig.get_value()
-            sig.add(bytes_from_crc64(depspec.signature))
-            sig.add(bytes_from_crc64(sig_value))
+            msg_context.sig_list.append(depspec.signature)
         else:
             # load and register on demand
             depspec = load_msg_by_type(msg_context, resolved_type, search_path)
             if depspec is None:
-                print(spec._parsed_fields)
                 spec._parsed_fields = [field for field in spec._parsed_fields if field.type != resolved_type]
-                print(spec._parsed_fields)
                 continue
             msg_context.register(resolved_type, depspec)
+            msg_context.sig_list.append(depspec.signature)
 
         # Update dependencies
         depends.append(resolved_type)
@@ -525,16 +608,13 @@ def load_msg_depends(msg_context, spec, search_path):
         dep_dependencies = msg_context.get_depends(resolved_type)
         if dep_dependencies is None:
             load_msg_depends(msg_context, depspec, search_path)
-            sig_value = sig.get_value()
-            sig.add(bytes_from_crc64(depspec.signature))
-            sig.add(bytes_from_crc64(sig_value))
+            msg_context.sig_list.append(depspec.signature)
 
         #fetch and update bit lengths from resolved dependencies
         spec.update_bit_length(depspec.min_bit_len, depspec.max_bit_len, unresolved_type)
     assert spec.full_name, "MsgSpec must have a properly set full name"
     msg_context.set_depends(spec.full_name, depends)
     # have to copy array in order to prevent inadvertent mutation (we've stored this list in set_dependencies)
-    spec.update_signature(sig.get_value())
     return depends[:]
             
 def load_depends(msg_context, spec, msg_search_path):
@@ -578,6 +658,8 @@ class MsgContext(object):
         self._registered_packages = {}
         self._files = {}
         self._dependencies = {}
+        self.normalized_def = StringIO()
+        self.is_srv = False
 
     def set_file(self, full_msg_type, file_path):
         self._files[full_msg_type] = file_path
@@ -667,7 +749,7 @@ def load_srv_from_string(msg_context, text, full_name):
     text_in  = StringIO()
     text_out = StringIO()
     accum = text_in
-
+    msg_context.is_srv = True
     package_name, short_name = package_resource_name(full_name)
     id, short_name = package_id_name(short_name)
     full_name = '/'.join([package_name,short_name])
@@ -677,10 +759,10 @@ def load_srv_from_string(msg_context, text, full_name):
             accum = text_out
         else:
             accum.write(l+'\n')
-
+    msg_context.write(full_name.replace('/','.'))
     # create separate MsgSpec objects for each half of file
-    msg_in = load_msg_from_string(msg_context, text_in.getvalue(), '%sRequest'%(full_name))
-    msg_out = load_msg_from_string(msg_context, text_out.getvalue(), '%sResponse'%(full_name))
+    msg_in = load_msg_from_string(msg_context, text_in.getvalue(), '%sRequest'%(full_name), 1)
+    msg_out = load_msg_from_string(msg_context, text_out.getvalue(), '%sResponse'%(full_name), 2)
     return SrvSpec(msg_in, msg_out, text, full_name)
 
 def load_srv_from_file(msg_context, file_path, full_name):

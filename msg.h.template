@@ -33,14 +33,14 @@ offset = 0
 #include <stdint.h>
 #include <float16.h>
 #include <string.h>
-@[for dependency in msg_context._dependencies[spec.full_name]]@
+@[for dependency in spec.depends]@
 #include <@(dependency).h>
 @[end for]
 
 @# Constants c style
 
 @[for constant in spec.constants]@
-#define @(constant.name) @(int(constant.val))
+#define @(spec.short_name.upper())_@(constant.name) @(int(constant.val))
 @[end for]
 @{
 if (spec.type == 'struct'):
@@ -51,7 +51,7 @@ else:
   for field in spec.parsed_fields():
     if field.bit_size > max_size:
       max_size = field.bit_size
-  print "#define %s_MAX_PACK_SIZE %d" % (spec.short_name.upper(),int(ceil(float(max_size)/8.0)))
+  print "#define %s_MAX_PACK_SIZE %d" % (spec.short_name.upper(), (max_size+7)/8)
 
 print "#define %s_DT_SIG 0x%XULL" % (spec.short_name.upper(), spec.signature)
 if spec.id is not None:
@@ -83,11 +83,8 @@ def print_field_def(field):
     return
   # detect embedded types
   array_size = ''
-  sl_pos = type.find('/')
   type_appendix = ''
   type_prefix = ''
-  if (sl_pos >= 0):
-    type = type[sl_pos + 1:]
 
   if field.array_size > 0:
     array_size = "[%d]" % field.array_size
@@ -97,9 +94,9 @@ def print_field_def(field):
     type_canard = type_map[type]
   else:
     #search through registered_packages
-    dep_field = msg_context._dependencies[spec.full_name]
-    if field.type in dep_field:
-      type_canard = field.type.replace('/','_')
+    dep_type = spec.depends
+    if type in dep_type:
+      type_canard = type.replace('/','_')
     else:
       raise Exception("Type {0} not supported, add to to template file!".format(type))
 
@@ -117,11 +114,7 @@ def print_encode_scalar(tabs, offset, field_len, field_name, is_saturated):
 def print_encode_custom_types(tabs, offset, field_len, field_type, field_name, tao_enable):
   print('%suint32_t %s = encode_%s(%s_buf, &msg->%s, %s);'
         %(tabs, field_len, field_type, field_name, field_name, tao_enable))
-  print('%sif (%s %% 8) {' % (tabs, field_len))
-  print('%s\t%s = (%s/8) + 1;'%(tabs, field_len, field_len))
-  print('%s} else {'%(tabs))
-  print('%s\t%s /= 8;'%(tabs, field_len))
-  print('%s}'%(tabs))
+  print('%s%s = (%s + 7)/8;'%(tabs, field_len, field_len))
   print('%smemmove(&buffer[%s], %s_buf, %s);'% (tabs, offset, field_name, field_len))
 
 def print_encode_scalar_array(tabs, offset, field_len, field_name, is_saturated):

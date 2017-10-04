@@ -42,6 +42,7 @@ import genmsg.command_line
 import genmsg.msgs
 import genmsg.msg_loader
 import genmsg.gentools
+from uavcan.dsdl import Parser
 
 # generate msg or srv files from a template file
 # template_map of the form { 'template_file':'output_file'} output_file can contain @NAME@ which will be replaced by the message/service name
@@ -49,15 +50,10 @@ def _generate_from_spec(input_file, output_dir, template_dir, msg_context, spec,
     if spec is None:
         return
 
-    # precompute msg definition once
-    if isinstance(spec, genmsg.msgs.MsgSpec):
-        msg_definition = genmsg.gentools.compute_full_text(msg_context, spec)
-
     # Loop over all files to generate
     for template_file_name, output_file_name in template_map.items():
         template_file = os.path.join(template_dir, template_file_name)
         output_file = os.path.join(output_dir, output_file_name.replace("@NAME@", spec.short_name.split('_')[-1]))
-
         #print "generate_from_template %s %s %s" % (input_file, template_file, output_file)
 
         ofile = open(output_file, 'w') #todo try
@@ -69,8 +65,6 @@ def _generate_from_spec(input_file, output_dir, template_dir, msg_context, spec,
             "search_path": search_path,
             "msg_context": msg_context
         }
-        if isinstance(spec, genmsg.msgs.MsgSpec):
-            g['msg_definition'] = msg_definition
 
         # todo, reuse interpreter
         interpreter = em.Interpreter(output=ofile, globals=g, options={em.RAW_OPT:True,em.BUFFERED_OPT:True})
@@ -85,10 +79,11 @@ def _generate_msg_from_file(input_file, output_dir, template_dir, search_path, p
     # Read MsgSpec from .msg file
     msg_context = genmsg.msg_loader.MsgContext.create_default()
     full_type_name = genmsg.gentools.compute_full_type_name(package_name, os.path.basename(input_file))
-    spec = genmsg.msg_loader.load_msg_from_file(msg_context, input_file, full_type_name)
-    # Load the dependencies
-    genmsg.msg_loader.load_depends(msg_context, spec, search_path)
-    # Generate the language dependent msg file
+    parser = Parser(search_path)
+    print(input_file)
+    t = parser.parse(input_file)
+    spec = genmsg.msg_loader.load_msg_from_parsed_type(msg_context, t, search_path)
+    # Generate the language dependentta msg file
     _generate_from_spec(input_file,
                             output_dir,
                             template_dir,
@@ -101,9 +96,11 @@ def _generate_srv_from_file(input_file, output_dir, template_dir, search_path, p
     # Read MsgSpec from .srv.file
     msg_context = genmsg.msg_loader.MsgContext.create_default()
     full_type_name = genmsg.gentools.compute_full_type_name(package_name, os.path.basename(input_file))
-    spec = genmsg.msg_loader.load_srv_from_file(msg_context, input_file, full_type_name)
-    # Load the dependencies
-    genmsg.msg_loader.load_depends(msg_context, spec, search_path)
+    parser = Parser(search_path)
+    print(input_file)
+    t = parser.parse(input_file)
+    spec = genmsg.msg_loader.load_srv_from_parsed_type(msg_context, t, search_path)
+
     # Generate the language dependent srv file
     _generate_from_spec(input_file,
                         output_dir,
@@ -142,18 +139,14 @@ def generate_from_file(root_directory, input_file, package_name, output_dir, tem
         if e.errno != errno.EEXIST: # ignore file exists error
             raise
 
-    # Parse include path dictionary
-    if( include_path ):
-        search_path = genmsg.command_line.includepath_to_dict(include_path)
-    else:
-        search_path = {}
+
 
     # Generate the file(s)
     if input_file.endswith(".uavcan"):
         if '\n---\n' in open(input_file).read():
-            _generate_srv_from_file(input_file, output_dir, template_dir, search_path, package_name, srv_template_dict, msg_template_dict)
+            _generate_srv_from_file(input_file, output_dir, template_dir, include_path, package_name, srv_template_dict, msg_template_dict)
         else:
-            _generate_msg_from_file(input_file, output_dir, template_dir, search_path, package_name, msg_template_dict)
+            _generate_msg_from_file(input_file, output_dir, template_dir, include_path, package_name, msg_template_dict)
     else:
         assert False, "Unknown file extension for %s"%input_file
 

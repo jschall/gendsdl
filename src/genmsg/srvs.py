@@ -39,6 +39,7 @@ import os
 import sys
 
 from . names import is_legal_resource_name, is_legal_resource_base_name, package_resource_name, resource_name
+from . signature import Signature, compute_signature, bytes_from_crc64
 
 class SrvSpec(object):
     

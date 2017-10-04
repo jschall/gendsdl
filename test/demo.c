@@ -17,9 +17,6 @@
 #include <string.h>
 #include <assert.h>
 #include <errno.h>
-#include <math.h>
-#include <uavcan/equipment/actuator/ArrayCommand.h>
-#include <float16.h>
 
 /*
  * Application constants
@@ -340,27 +337,14 @@ void process1HzTasks(uint64_t timestamp_usec)
      * Transmitting the node status message periodically.
      */
     {
-        uint8_t buffer[UAVCAN_EQUIPMENT_ACTUATOR_ARRAYCOMMAND_MAX_PACK_SIZE];
+        uint8_t buffer[UAVCAN_NODE_STATUS_MESSAGE_SIZE];
         makeNodeStatusMessage(buffer);
 
         static uint8_t transfer_id;
-        struct uavcan_equipment_actuator_ArrayCommand cmd;
-        for (uint8_t i = 0; i < 10; i++) {
-            cmd.commands[i].actuator_id = i;
-            cmd.commands[i].command_type = COMMAND_TYPE_SPEED;
-            cmd.commands[i].command_value = to_float16(1100+i);
-        }
-        cmd.commands_len = 10;
-        uint32_t len = encode_uavcan_equipment_actuator_ArrayCommand(buffer, &cmd, true);
-        if ( len % 8 ) {
-            len = (len/8) + 1;
-        } else {
-            len /= 8;
-        }
-        printf("%d\n", len);
-        const int bc_res = canardBroadcast(&canard, UAVCAN_EQUIPMENT_ACTUATOR_ARRAYCOMMAND_DT_SIG,
-                                           UAVCAN_EQUIPMENT_ACTUATOR_ARRAYCOMMAND_DT_ID, &transfer_id, CANARD_TRANSFER_PRIORITY_LOW,
-                                           buffer, len);
+
+        const int bc_res = canardBroadcast(&canard, UAVCAN_NODE_STATUS_DATA_TYPE_SIGNATURE,
+                                           UAVCAN_NODE_STATUS_DATA_TYPE_ID, &transfer_id, CANARD_TRANSFER_PRIORITY_LOW,
+                                           buffer, UAVCAN_NODE_STATUS_MESSAGE_SIZE);
         if (bc_res <= 0)
         {
             (void)fprintf(stderr, "Could not broadcast node status; error %d\n", bc_res);
@@ -445,9 +429,77 @@ int main(int argc, char** argv)
     /*
      * Performing the dynamic node ID allocation procedure.
      */
+    static const uint8_t PreferredNodeID = CANARD_BROADCAST_NODE_ID;    ///< This can be made configurable, obviously
 
     node_id_allocation_unique_id_offset = 0;
-    canardSetLocalNodeID(&canard, 21);
+
+    uint8_t node_id_allocation_transfer_id = 0;
+
+    while (canardGetLocalNodeID(&canard) == CANARD_BROADCAST_NODE_ID)
+    {
+        puts("Waiting for dynamic node ID allocation...");
+
+        send_next_node_id_allocation_request_at =
+            getMonotonicTimestampUSec() + UAVCAN_NODE_ID_ALLOCATION_REQUEST_DELAY_OFFSET_USEC +
+            (uint64_t)(getRandomFloat() * UAVCAN_NODE_ID_ALLOCATION_RANDOM_TIMEOUT_RANGE_USEC);
+
+        while ((getMonotonicTimestampUSec() < send_next_node_id_allocation_request_at) &&
+               (canardGetLocalNodeID(&canard) == CANARD_BROADCAST_NODE_ID))
+        {
+            processTxRxOnce(&socketcan, 1);
+        }
+
+        if (canardGetLocalNodeID(&canard) != CANARD_BROADCAST_NODE_ID)
+        {
+            break;
+        }
+
+        // Structure of the request is documented in the DSDL definition
+        // See http://uavcan.org/Specification/6._Application_level_functions/#dynamic-node-id-allocation
+        uint8_t allocation_request[CANARD_CAN_FRAME_MAX_DATA_LEN - 1];
+        allocation_request[0] = PreferredNodeID << 1;
+
+        if (node_id_allocation_unique_id_offset == 0)
+        {
+            allocation_request[0] |= 1;     // First part of unique ID
+        }
+
+        uint8_t my_unique_id[UNIQUE_ID_LENGTH_BYTES];
+        readUniqueID(my_unique_id);
+
+        static const uint8_t MaxLenOfUniqueIDInRequest = 6;
+        uint8_t uid_size = (uint8_t)(UNIQUE_ID_LENGTH_BYTES - node_id_allocation_unique_id_offset);
+        if (uid_size > MaxLenOfUniqueIDInRequest)
+        {
+            uid_size = MaxLenOfUniqueIDInRequest;
+        }
+
+        // Paranoia time
+        assert(node_id_allocation_unique_id_offset < UNIQUE_ID_LENGTH_BYTES);
+        assert(uid_size <= MaxLenOfUniqueIDInRequest);
+        assert(uid_size > 0);
+        assert((uid_size + node_id_allocation_unique_id_offset) <= UNIQUE_ID_LENGTH_BYTES);
+
+        memmove(&allocation_request[1], &my_unique_id[node_id_allocation_unique_id_offset], uid_size);
+
+        // Broadcasting the request
+        const int bcast_res = canardBroadcast(&canard,
+                                              UAVCAN_NODE_ID_ALLOCATION_DATA_TYPE_SIGNATURE,
+                                              UAVCAN_NODE_ID_ALLOCATION_DATA_TYPE_ID,
+                                              &node_id_allocation_transfer_id,
+                                              CANARD_TRANSFER_PRIORITY_LOW,
+                                              &allocation_request[0],
+                                              (uint16_t) (uid_size + 1));
+        if (bcast_res < 0)
+        {
+            (void)fprintf(stderr, "Could not broadcast dynamic node ID allocation request; error %d\n", bcast_res);
+        }
+
+        // Preparing for timeout; if response is received, this value will be updated from the callback.
+        node_id_allocation_unique_id_offset = 0;
+    }
+
+    printf("Dynamic node ID allocation complete [%d]\n", canardGetLocalNodeID(&canard));
 
     /*
      * Running the main loop.
