@@ -104,7 +104,7 @@ def print_field_def(field):
 
 
 def print_encode_scalar(tabs, offset, field_len, field_name, is_saturated):
-  if is_saturated:
+  if is_saturated and int(field_len) not in (1, 8,16,32,64):
     sat_val = (1 << int(field_len)) - 1
     print('%sif (%s > %d) {'%(tabs, field_name, sat_val))
     print('%s\t%s = %d;'%(tabs, field_name, sat_val))
@@ -142,7 +142,7 @@ def print_decode_custom_types(tabs, field_len, offset, field_type, field_name, t
   print('%suint32_t %s = decode_%s(transfer, %s, &msg->%s, %s);'
         %(tabs, field_len, field_type, offset, field_name, tao_enable))
 def print_decode_scalar_array(tabs, offset, field_len, is_signed, field_name):
-  print('%scanardDecodeScalar(transfer, %s, %s, %s, &s%s[cnt]);'% (tabs, offset, field_len, is_signed, field_name))
+  print('%scanardDecodeScalar(transfer, %s, %s, %s, &%s[cnt]);'% (tabs, offset, field_len, is_signed, field_name))
 
 def print_decode_custom_types_array(tabs, field_len, offset, field_type, field_name, tao_enable):
   print('%suint32_t %s = decode_%s(transfer, %s, &msg->%s[cnt], %s);'
@@ -254,13 +254,9 @@ def print_field_encode_decode_struct(field, do_encode):
           print('\tuint32_t %s = 0;'% field_len)
           print('\tuint32_t %s;'% field_ulen)
           offset_append += field_len + " + "
-          if do_encode or field.tao_flag != 1:
-            print('\tassert(msg->%s_len <= %d);' % (field.name, field.array_size))
-          else:
+          if not do_encode and field.tao_flag == 1:
             print('\tif(tao_mode) {')
             print('\t\tmsg->%s_len = %d;'%(field.name,field.array_size))
-            print('\t} else {')
-            print('\t\tassert(msg->%s_len <= %d);' % (field.name, field.array_size))
             print('\t}')
           print('\tfor (uint16_t cnt = 0; cnt < msg->%s_len; cnt++) {' % field.name)
           if do_encode:
@@ -286,7 +282,6 @@ def print_field_encode_decode_struct(field, do_encode):
           print('\tuint32_t %s = 0;'% field_len)
           print('\tuint32_t %s;'% field_ulen)
           offset_append += field_len + " + "
-          print('\tassert(msg->%s_len <= %d);' % (field.name, field.array_size))
           print('\tuint16_t cnt;')
           print('\tfor (cnt = 0; cnt < msg->%s_len - 1; cnt++) {' % field.name)
           if do_encode:
@@ -313,14 +308,13 @@ def print_field_encode_decode_struct(field, do_encode):
             print('\tif (tao_mode) {')
             print('\t\tmsg->%s_len = (transfer->payload_len*8 - (%s%d))/%d;' % (field.name, offset_append, offset, field.bit_size))
             print('\t}')
-          print('\tassert(msg->%s_len <= %d);' % (field.name, field.array_size))
           print('\tfor (uint16_t cnt = 0; cnt < msg->%s_len; cnt++) {' % field.name)
           if do_encode:
             print_encode_scalar_array('\t\t', offset_append+'cnt*'+str(field.bit_size)+' + ' + str(offset), str(field.bit_size),
-                              '&msg->%s'%field.name, field.is_saturated)
+                              'msg->%s'%field.name, field.is_saturated)
           else:
             print_decode_scalar_array('\t\t', offset_append+'cnt*'+str(field.bit_size)+' + ' + str(offset), str(field.bit_size),
-                              field.is_signed, '&msg->%s'%field.name)
+                              field.is_signed, 'msg->%s'%field.name)
           print('\t}')
           offset_append += "msg->%s_len*%d + " % (field.name, field.bit_size)
   #we remove the bit offset in the return if there
