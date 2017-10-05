@@ -17,7 +17,8 @@
 #include <string.h>
 #include <assert.h>
 #include <errno.h>
-
+#include <uavcan/protocol/dynamic_node_id/Allocation.h>
+#include <uavcan/protocol/GetNodeInfo.h>
 /*
  * Application constants
  */
@@ -114,10 +115,8 @@ void readUniqueID(uint8_t* out_uid)
 }
 
 
-void makeNodeStatusMessage(uint8_t buffer[UAVCAN_NODE_STATUS_MESSAGE_SIZE])
+void makeNodeStatusMessage(uavcan_protocol_NodeStatus *node_status)
 {
-    memset(buffer, 0, UAVCAN_NODE_STATUS_MESSAGE_SIZE);
-
     static uint32_t started_at_sec = 0;
     if (started_at_sec == 0)
     {
@@ -130,9 +129,11 @@ void makeNodeStatusMessage(uint8_t buffer[UAVCAN_NODE_STATUS_MESSAGE_SIZE])
      * Here we're using the helper for demonstrational purposes; in this simple case it could be preferred to
      * encode the values manually.
      */
-    canardEncodeScalar(buffer,  0, 32, &uptime_sec);
-    canardEncodeScalar(buffer, 32,  2, &node_health);
-    canardEncodeScalar(buffer, 34,  3, &node_mode);
+    node_status->uptime_sec = uptime_sec;
+    node_status->health = node_health;
+    node_status->mode = node_mode;
+    node_status->sub_mode = 0;
+    node_status->vendor_specific_status_code = 0;
 }
 
 
@@ -163,37 +164,31 @@ static void onTransferReceived(CanardInstance* ins,
         }
 
         // Copying the unique ID from the message
-        static const unsigned UniqueIDBitOffset = 8;
-        uint8_t received_unique_id[UNIQUE_ID_LENGTH_BYTES];
-        uint8_t received_unique_id_len = 0;
-        for (; received_unique_id_len < (transfer->payload_len - (UniqueIDBitOffset / 8U)); received_unique_id_len++)
-        {
-            assert(received_unique_id_len < UNIQUE_ID_LENGTH_BYTES);
-            const uint8_t bit_offset = (uint8_t)(UniqueIDBitOffset + received_unique_id_len * 8U);
-            (void) canardDecodeScalar(transfer, bit_offset, 8, false, &received_unique_id[received_unique_id_len]);
-        }
+
+        uavcan_protocol_dynamic_node_id_Allocation allocation;
+        decode_uavcan_protocol_dynamic_node_id_Allocation(transfer, 0, &allocation, true);
 
         // Obtaining the local unique ID
         uint8_t my_unique_id[UNIQUE_ID_LENGTH_BYTES];
         readUniqueID(my_unique_id);
 
         // Matching the received UID against the local one
-        if (memcmp(received_unique_id, my_unique_id, received_unique_id_len) != 0)
+        if (memcmp(allocation.unique_id, my_unique_id, allocation.unique_id_len) != 0)
         {
             printf("Mismatching allocation response from %d:", transfer->source_node_id);
-            for (int i = 0; i < received_unique_id_len; i++)
+            for (int i = 0; i < allocation.unique_id_len; i++)
             {
-                printf(" %02x/%02x", received_unique_id[i], my_unique_id[i]);
+                printf(" %02x/%02x", allocation.unique_id[i], my_unique_id[i]);
             }
             puts("");
             node_id_allocation_unique_id_offset = 0;
             return;         // No match, return
         }
 
-        if (received_unique_id_len < UNIQUE_ID_LENGTH_BYTES)
+        if (allocation.unique_id_len < UNIQUE_ID_LENGTH_BYTES)
         {
             // The allocator has confirmed part of unique ID, switching to the next stage and updating the timeout.
-            node_id_allocation_unique_id_offset = received_unique_id_len;
+            node_id_allocation_unique_id_offset = allocation.unique_id_len;
             send_next_node_id_allocation_request_at -= UAVCAN_NODE_ID_ALLOCATION_REQUEST_DELAY_OFFSET_USEC;
 
             printf("Matching allocation response from %d offset %d\n",
@@ -202,8 +197,7 @@ static void onTransferReceived(CanardInstance* ins,
         else
         {
             // Allocation complete - copying the allocated node ID from the message
-            uint8_t allocated_node_id = 0;
-            (void) canardDecodeScalar(transfer, 0, 7, false, &allocated_node_id);
+            uint8_t allocated_node_id = allocation.node_id;
             assert(allocated_node_id <= 127);
 
             canardSetLocalNodeID(ins, allocated_node_id);
@@ -212,48 +206,45 @@ static void onTransferReceived(CanardInstance* ins,
     }
 
     if ((transfer->transfer_type == CanardTransferTypeRequest) &&
-        (transfer->data_type_id == UAVCAN_GET_NODE_INFO_DATA_TYPE_ID))
+        (transfer->data_type_id == UAVCAN_PROTOCOL_GETNODEINFORESPONSE_DT_ID))
     {
         printf("GetNodeInfo request from %d\n", transfer->source_node_id);
 
-        uint8_t buffer[UAVCAN_GET_NODE_INFO_RESPONSE_MAX_SIZE];
-        memset(buffer, 0, UAVCAN_GET_NODE_INFO_RESPONSE_MAX_SIZE);
-
+        uint8_t buffer[UAVCAN_PROTOCOL_GETNODEINFORESPONSE_MAX_PACK_SIZE];
+        uavcan_protocol_GetNodeInfoResponse node_info;
         // NodeStatus
-        makeNodeStatusMessage(buffer);
-
+        makeNodeStatusMessage(&node_info.status);
+        
         // SoftwareVersion
-        buffer[7] = APP_VERSION_MAJOR;
-        buffer[8] = APP_VERSION_MINOR;
-        buffer[9] = 1;                          // Optional field flags, VCS commit is set
-        uint32_t u32 = GIT_HASH;
-        canardEncodeScalar(buffer, 80, 32, &u32);
+        node_info.software_version.major = APP_VERSION_MAJOR;
+        node_info.software_version.minor = APP_VERSION_MINOR;
+        node_info.software_version.optional_field_flags = 1;  // Optional field flags, VCS commit is set
+        node_info.software_version.vcs_commit = GIT_HASH;
         // Image CRC skipped
 
         // HardwareVersion
         // Major skipped
         // Minor skipped
-        readUniqueID(&buffer[24]);
+        readUniqueID(node_info.hardware_version.unique_id);
         // Certificate of authenticity skipped
 
         // Name
-        const size_t name_len = strlen(APP_NODE_NAME);
-        memcpy(&buffer[41], APP_NODE_NAME, name_len);
+        node_info.name_len = strlen(APP_NODE_NAME);
+        memcpy(node_info.name, APP_NODE_NAME, node_info.name_len);
 
-        const size_t total_size = 41 + name_len;
-
+        uint32_t pack_len = encode_uavcan_protocol_GetNodeInfoResponse(buffer, &node_info, true);
         /*
          * Transmitting; in this case we don't have to release the payload because it's empty anyway.
          */
         const int resp_res = canardRequestOrRespond(ins,
                                                     transfer->source_node_id,
-                                                    UAVCAN_GET_NODE_INFO_DATA_TYPE_SIGNATURE,
-                                                    UAVCAN_GET_NODE_INFO_DATA_TYPE_ID,
+                                                    UAVCAN_PROTOCOL_GETNODEINFORESPONSE_DT_SIG,
+                                                    UAVCAN_PROTOCOL_GETNODEINFORESPONSE_DT_ID,
                                                     &transfer->transfer_id,
                                                     transfer->priority,
                                                     CanardResponse,
                                                     &buffer[0],
-                                                    (uint16_t)total_size);
+                                                    (uint16_t)(pack_len+7)/8);
         if (resp_res <= 0)
         {
             (void)fprintf(stderr, "Could not respond to GetNodeInfo; error %d\n", resp_res);
@@ -337,14 +328,16 @@ void process1HzTasks(uint64_t timestamp_usec)
      * Transmitting the node status message periodically.
      */
     {
-        uint8_t buffer[UAVCAN_NODE_STATUS_MESSAGE_SIZE];
-        makeNodeStatusMessage(buffer);
+        uint8_t buffer[UAVCAN_PROTOCOL_NODESTATUS_MAX_PACK_SIZE];
+        uavcan_protocol_NodeStatus node_status;
 
+        makeNodeStatusMessage(&node_status);
+        uint32_t status_len = encode_uavcan_protocol_NodeStatus(buffer, &node_status, true);
         static uint8_t transfer_id;
 
-        const int bc_res = canardBroadcast(&canard, UAVCAN_NODE_STATUS_DATA_TYPE_SIGNATURE,
-                                           UAVCAN_NODE_STATUS_DATA_TYPE_ID, &transfer_id, CANARD_TRANSFER_PRIORITY_LOW,
-                                           buffer, UAVCAN_NODE_STATUS_MESSAGE_SIZE);
+        const int bc_res = canardBroadcast(&canard, UAVCAN_PROTOCOL_NODESTATUS_DT_SIG,
+                                           UAVCAN_PROTOCOL_NODESTATUS_DT_ID, &transfer_id, CANARD_TRANSFER_PRIORITY_LOW,
+                                           buffer, (status_len+7)/8);
         if (bc_res <= 0)
         {
             (void)fprintf(stderr, "Could not broadcast node status; error %d\n", bc_res);
@@ -456,40 +449,44 @@ int main(int argc, char** argv)
 
         // Structure of the request is documented in the DSDL definition
         // See http://uavcan.org/Specification/6._Application_level_functions/#dynamic-node-id-allocation
-        uint8_t allocation_request[CANARD_CAN_FRAME_MAX_DATA_LEN - 1];
-        allocation_request[0] = PreferredNodeID << 1;
+        uavcan_protocol_dynamic_node_id_Allocation allocation;
+        uint8_t allocation_buffer[UAVCAN_PROTOCOL_DYNAMIC_NODE_ID_ALLOCATION_MAX_PACK_SIZE];
+        allocation.node_id = PreferredNodeID;
 
         if (node_id_allocation_unique_id_offset == 0)
         {
-            allocation_request[0] |= 1;     // First part of unique ID
+            allocation.first_part_of_unique_id = 1;     // First part of unique ID
+        }
+        else
+        {
+            allocation.first_part_of_unique_id = 0;     // First part of unique ID
         }
 
         uint8_t my_unique_id[UNIQUE_ID_LENGTH_BYTES];
         readUniqueID(my_unique_id);
-
         static const uint8_t MaxLenOfUniqueIDInRequest = 6;
         uint8_t uid_size = (uint8_t)(UNIQUE_ID_LENGTH_BYTES - node_id_allocation_unique_id_offset);
         if (uid_size > MaxLenOfUniqueIDInRequest)
         {
             uid_size = MaxLenOfUniqueIDInRequest;
         }
-
+        allocation.unique_id_len = uid_size;
         // Paranoia time
         assert(node_id_allocation_unique_id_offset < UNIQUE_ID_LENGTH_BYTES);
         assert(uid_size <= MaxLenOfUniqueIDInRequest);
         assert(uid_size > 0);
         assert((uid_size + node_id_allocation_unique_id_offset) <= UNIQUE_ID_LENGTH_BYTES);
-
-        memmove(&allocation_request[1], &my_unique_id[node_id_allocation_unique_id_offset], uid_size);
-
+        memcpy(allocation.unique_id, &my_unique_id[node_id_allocation_unique_id_offset], uid_size);
+        uint32_t buf_len = encode_uavcan_protocol_dynamic_node_id_Allocation(allocation_buffer, &allocation, true);
+        printf("%d\n", buf_len);
         // Broadcasting the request
         const int bcast_res = canardBroadcast(&canard,
-                                              UAVCAN_NODE_ID_ALLOCATION_DATA_TYPE_SIGNATURE,
-                                              UAVCAN_NODE_ID_ALLOCATION_DATA_TYPE_ID,
+                                              UAVCAN_PROTOCOL_DYNAMIC_NODE_ID_ALLOCATION_DT_SIG,
+                                              UAVCAN_PROTOCOL_DYNAMIC_NODE_ID_ALLOCATION_DT_ID,
                                               &node_id_allocation_transfer_id,
                                               CANARD_TRANSFER_PRIORITY_LOW,
-                                              &allocation_request[0],
-                                              (uint16_t) (uid_size + 1));
+                                              &allocation_buffer[0],
+                                              (buf_len+7)/8);
         if (bcast_res < 0)
         {
             (void)fprintf(stderr, "Could not broadcast dynamic node ID allocation request; error %d\n", bcast_res);
