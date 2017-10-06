@@ -166,7 +166,7 @@ static void onTransferReceived(CanardInstance* ins,
         // Copying the unique ID from the message
 
         uavcan_protocol_dynamic_node_id_Allocation allocation;
-        decode_uavcan_protocol_dynamic_node_id_Allocation(transfer, 0, &allocation, true);
+        decode_uavcan_protocol_dynamic_node_id_Allocation(transfer, &allocation);
 
         // Obtaining the local unique ID
         uint8_t my_unique_id[UNIQUE_ID_LENGTH_BYTES];
@@ -232,7 +232,7 @@ static void onTransferReceived(CanardInstance* ins,
         node_info.name_len = strlen(APP_NODE_NAME);
         memcpy(node_info.name, APP_NODE_NAME, node_info.name_len);
 
-        uint32_t pack_len = encode_uavcan_protocol_GetNodeInfoResponse(buffer, &node_info, true);
+        uint16_t pack_len = encode_uavcan_protocol_GetNodeInfoResponse(buffer, &node_info);
         /*
          * Transmitting; in this case we don't have to release the payload because it's empty anyway.
          */
@@ -244,7 +244,7 @@ static void onTransferReceived(CanardInstance* ins,
                                                     transfer->priority,
                                                     CanardResponse,
                                                     &buffer[0],
-                                                    (uint16_t)(pack_len+7)/8);
+                                                    (pack_len));
         if (resp_res <= 0)
         {
             (void)fprintf(stderr, "Could not respond to GetNodeInfo; error %d\n", resp_res);
@@ -332,12 +332,12 @@ void process1HzTasks(uint64_t timestamp_usec)
         uavcan_protocol_NodeStatus node_status;
 
         makeNodeStatusMessage(&node_status);
-        uint32_t status_len = encode_uavcan_protocol_NodeStatus(buffer, &node_status, true);
+        uint16_t status_len = encode_uavcan_protocol_NodeStatus(buffer, &node_status);
         static uint8_t transfer_id;
 
         const int bc_res = canardBroadcast(&canard, UAVCAN_PROTOCOL_NODESTATUS_DT_SIG,
                                            UAVCAN_PROTOCOL_NODESTATUS_DT_ID, &transfer_id, CANARD_TRANSFER_PRIORITY_LOW,
-                                           buffer, (status_len+7)/8);
+                                           buffer, (status_len));
         if (bc_res <= 0)
         {
             (void)fprintf(stderr, "Could not broadcast node status; error %d\n", bc_res);
@@ -477,8 +477,7 @@ int main(int argc, char** argv)
         assert(uid_size > 0);
         assert((uid_size + node_id_allocation_unique_id_offset) <= UNIQUE_ID_LENGTH_BYTES);
         memcpy(allocation.unique_id, &my_unique_id[node_id_allocation_unique_id_offset], uid_size);
-        uint32_t buf_len = encode_uavcan_protocol_dynamic_node_id_Allocation(allocation_buffer, &allocation, true);
-        printf("%d\n", buf_len);
+        uint16_t buf_len = encode_uavcan_protocol_dynamic_node_id_Allocation(allocation_buffer, &allocation);
         // Broadcasting the request
         const int bcast_res = canardBroadcast(&canard,
                                               UAVCAN_PROTOCOL_DYNAMIC_NODE_ID_ALLOCATION_DT_SIG,
@@ -486,7 +485,7 @@ int main(int argc, char** argv)
                                               &node_id_allocation_transfer_id,
                                               CANARD_TRANSFER_PRIORITY_LOW,
                                               &allocation_buffer[0],
-                                              (buf_len+7)/8);
+                                              (buf_len));
         if (bcast_res < 0)
         {
             (void)fprintf(stderr, "Could not broadcast dynamic node ID allocation request; error %d\n", bcast_res);

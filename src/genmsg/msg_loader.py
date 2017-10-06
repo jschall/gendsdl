@@ -172,8 +172,6 @@ def parse_primitive_type(clean_line):
  
 def load_msg_from_parsed_fields(msg_context, parsed_type, parsed_fields, parsed_constants, max_bit_len, min_bit_len, is_union, is_srv = 0):
 
-    if len(parsed_fields) == 0:
-        return None
     full_name = parsed_type.full_name.replace('.', '/')
     if is_srv == 1:
         full_name += 'Request'
@@ -258,15 +256,15 @@ def load_msg_from_parsed_fields(msg_context, parsed_type, parsed_fields, parsed_
         type = "union"
     else:
         type = "struct"
-
-    if darray_flags[-1]:
-        if bit_sizes[-1] >= 8:
-            tao_flags[-1] = 1
-        elif parsed_fields[-1].type.value_type == uavcan.Type.CATEGORY_COMPOUND:
-            if parsed_fields[-1].type.value_type.get_min_bitlen() >= 8:
+    if len(darray_flags) > 0:
+        if darray_flags[-1]:
+            if bit_sizes[-1] >= 8:
                 tao_flags[-1] = 1
-            else:
-                tao_flags[-1] = 3
+            elif parsed_fields[-1].type.value_type == uavcan.Type.CATEGORY_COMPOUND:
+                if parsed_fields[-1].type.value_type.get_min_bitlen() >= 8:
+                    tao_flags[-1] = 1
+                else:
+                    tao_flags[-1] = 3
     spec = MsgSpec(types, names, constants, depends, parsed_type.source_text, full_name, max_bit_len, min_bit_len,
                    bit_sizes, array_sizes, tao_flags, darray_flags, is_signed_flags, is_saturated_flags, 
                    package_name, short_name, parsed_type.default_dtid, type)
