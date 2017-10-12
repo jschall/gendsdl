@@ -1,0 +1,135 @@
+@###############################################
+@#
+@# Canard message source code
+@# generation for C++
+@#
+@# EmPy template for generating <msg>.h files
+@# Based on the original template for ROS
+@#
+@###############################################
+@# Start of Template
+@#
+@# Context:
+@#  - file_name_in (String) Source file
+@#  - spec (msggen.MsgSpec) Parsed specification of the .msg file
+@#  - md5sum (String) MD5Sum of the .msg specification
+@###############################################
+
+/* Auto-generated from file @file_name_in */
+
+@{
+import genmsg.msgs
+from math import ceil, pow
+from numpy import log2
+from canard_printer_funcs import *
+canard_name = '%s'%spec.short_name
+topic_name = spec.short_name
+offset = 0
+}@
+
+#pragma once
+
+@##############################
+@# Generic Includes
+@##############################
+#include <stdint.h>
+#include <float16.h>
+#include <string.h>
+@[for dependency in spec.depends]@
+#include <@(dependency).h>
+@[end for]
+
+@# Constants c style
+
+@[for constant in spec.constants]@
+#define @(spec.short_name.upper())_@(constant.name) @(int(constant.val))
+@[end for]
+@{
+if (spec.type == 'struct'):
+        print "#define %s_MAX_PACK_SIZE %d" % (spec.short_name.upper(),int(ceil(float(spec.max_bit_len)/8.0)))
+        print "#define %s_MIN_PACK_SIZE %d" % (spec.short_name.upper(), int(ceil(float(spec.min_bit_len)/8.0)))
+else:
+    max_size = 0
+    for field in spec.parsed_fields():
+        if field.bit_size > max_size:
+            max_size = field.bit_size
+    print "#define %s_MAX_PACK_SIZE %d" % (spec.short_name.upper(), (max_size+7)/8)
+
+print "#define %s_DT_SIG 0x%XULL" % (spec.short_name.upper(), spec.signature)
+if spec.id is not None:
+    print "#define %s_DT_ID %s" % (spec.short_name.upper(), spec.id)
+}@
+@##############################
+@# Main struct of message
+@##############################
+
+typedef struct @(canard_name) @(canard_name);
+#ifdef __cplusplus
+@#class @(canard_name) {
+struct __EXPORT @(canard_name) {
+@#public:
+#else
+struct @(canard_name) {
+#endif
+@{
+# loop over all fields and print the type and name
+if spec.type == 'union':
+    print('    uint8_t tag;')
+#we cannot have empty struct so we define a placeholder variable
+if len(spec.parsed_fields()) == 0:
+    print('    uint8_t empty;')
+for field in spec.parsed_fields():
+    if (not field.is_header):
+        print_field_def(spec, field)
+}@
+};
+
+
+void _encode_@(canard_name)(uint8_t buffer[], uint32_t *bit_ofs, @(canard_name) *msg, bool tao_mode)
+{
+@{
+print """
+    //in case we don\'t use these
+    (void)buffer;
+    (void)bit_ofs;
+    (void)msg;
+    (void)tao_mode;
+"""
+if spec.type == "struct":
+    print_field_encode_decode_struct(spec, spec.parsed_fields(), True)
+else:
+    print_field_encode_decode_union(spec, spec.parsed_fields(), True)
+}@
+}
+
+uint32_t encode_@(canard_name)(uint8_t buffer[], @(canard_name) *msg)
+{
+    uint32_t bit_ofs = 0;
+    memset(buffer, 0, @(canard_name.upper())_MAX_PACK_SIZE);
+    _encode_@(canard_name)(buffer, &bit_ofs, msg, true);
+    return (bit_ofs+7)/8;
+}
+
+void _decode_@(canard_name)(const CanardRxTransfer* transfer, uint32_t *bit_ofs, @(canard_name) *msg, bool tao_mode)
+{
+@{
+print """
+    //in case we don\'t use these
+    (void)transfer;
+    (void)bit_ofs;
+    (void)msg;
+    (void)tao_mode;
+"""
+if spec.type == "struct":
+    print_field_encode_decode_struct(spec, spec.parsed_fields(), False)
+else:
+    print_field_encode_decode_union(spec, spec.parsed_fields(), False)
+}@
+}
+
+uint32_t decode_@(canard_name)(const CanardRxTransfer* transfer, @(canard_name) *msg)
+{
+    uint32_t bit_ofs = 0;
+    _decode_@(canard_name)(transfer, &bit_ofs, msg, true);
+    return (bit_ofs+7)/8;
+}
