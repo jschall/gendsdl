@@ -15,10 +15,11 @@ type_map = {'int8': 'int8_t',
             'char': 'char'}
 
 # Function to print a standard ros type
-def print_field_def(spec, field):
+def print_field_def(ind_lev, ind, spec, field):
     type = field.type
     if type == 'void':
         return
+
     # detect embedded types
     array_size = ''
     type_appendix = ''
@@ -38,7 +39,7 @@ def print_field_def(spec, field):
         else:
             raise Exception("Type {0} not supported, add to to template file!".format(type))
 
-    print('\t%s%s%s %s%s;'%(type_prefix, type_canard, type_appendix, field.name, array_size))
+    print('%s%s%s%s %s%s;'%(ind*ind_lev, type_prefix, type_canard, type_appendix, field.name, array_size))
 
 #Encode Prints
 def print_encode_scalar(tabs, field_len, field_name, is_saturated):

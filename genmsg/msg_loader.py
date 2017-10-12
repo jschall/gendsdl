@@ -195,16 +195,16 @@ def load_msg_from_parsed_fields(msg_context, parsed_type, parsed_fields, parsed_
     for field in parsed_fields:
         if field.type.category == uavcan.Type.CATEGORY_ARRAY:
             if field.type.mode == uavcan.ArrayType.MODE_DYNAMIC:
-                bitlen = int(ceil(numpy.log2(int(field.type.max_size)+1)))
-                conv_type = parse_primitive_type("uint%d" % (bitlen))
-                bit_sizes.append(bitlen)
-                array_sizes.append(0)
-                types.append(conv_type)
-                names.append(field.name+'_len')
-                tao_flags.append(0)
-                darray_flags.append(False)
-                is_signed_flags.append('false')
-                is_saturated_flags.append(True)
+                #bitlen = int(ceil(numpy.log2(int(field.type.max_size)+1)))
+                #conv_type = parse_primitive_type("uint%d" % (bitlen))
+                #bit_sizes.append(bitlen)
+                #array_sizes.append(0)
+                #types.append(conv_type)
+                #names.append(field.name+'_len')
+                #tao_flags.append(0)
+                #darray_flags.append(False)
+                #is_signed_flags.append('false')
+                #is_saturated_flags.append(True)
                 darray_flags.append(True)
             else:
                 darray_flags.append(False)
